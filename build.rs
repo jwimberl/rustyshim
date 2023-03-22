@@ -16,6 +16,8 @@ fn main() {
         .file("include/client.h")
         .file("src/client.cpp")
         .flag("-std=c++17")
+        .flag("-Wno-unused-parameter")
+        .flag("-Wno-unused-variable")
         .compile("client");
 
     // Make Rust bindings for client.h

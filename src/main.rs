@@ -15,7 +15,7 @@ fn main() {
 
     // Connect...
     let mut status : i32 = 0;
-    let conn = scidbconnect(hostname, username, password, scidbport, &mut status);
+    let conn = scidb_connect(hostname, username, password, scidbport, &mut status);
     dbg!(conn);
     dbg!(status);
     if status != 0 {
@@ -25,11 +25,11 @@ fn main() {
 
     // Run a query...
     let query = "aio_save(list(\'instances\'),\'/tmp/rusttest\',format:\'tdv\');";
-    let (qid, error) = executeQuery(conn, query);
+    let (qid, error) = execute_query(conn, query);
     println!("Executing SciDB query {qid} -- error string {error}");
 }
 
-fn scidbconnect(hostname : &str, username : &str, password : &str, scidbport : i32, status : &mut i32) -> *mut c_void {
+fn scidb_connect(hostname : &str, username : &str, password : &str, scidbport : i32, status : &mut i32) -> *mut c_void {
     let sp = status as *mut i32;
     let mut h = String::from(hostname);
     h.push('\0');
@@ -45,7 +45,7 @@ fn scidbconnect(hostname : &str, username : &str, password : &str, scidbport : i
     }
 }
 
-fn executeQuery(conn : *mut c_void, query : &str) -> (u64, String) {
+fn execute_query(conn : *mut c_void, query : &str) -> (u64, String) {
     let mut q = String::from(query);
     q.push('\0');
     let mut output : [c_char; 1024] = [0; 1024];
