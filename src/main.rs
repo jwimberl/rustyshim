@@ -1,8 +1,12 @@
 use rustyshim::scidbconnect as c_scidbconnect;
 use rustyshim::executeQuery as c_executeQuery;
 
+use std::ffi::CStr;
+use std::ffi::CString;
 use std::os::raw::c_char;
 use std::os::raw::c_void;
+
+const MAX_VARLEN : usize = 4096;
 
 fn main() {
     println!("Hello, world!");
@@ -31,29 +35,20 @@ fn main() {
 
 fn scidb_connect(hostname : &str, username : &str, password : &str, scidbport : i32, status : &mut i32) -> *mut c_void {
     let sp = status as *mut i32;
-    let mut h = String::from(hostname);
-    h.push('\0');
-    let mut u = String::from(username);
-    u.push('\0');
-    let mut p = String::from(password);
-    p.push('\0');
+    let chostname = CString::new(hostname).unwrap();
+    let cusername = CString::new(username).unwrap();
+    let cpassword = CString::new(password).unwrap();
     unsafe {
-        let chostname = (&h[..]).as_bytes().as_ptr() as *mut c_char;
-        let cusername = (&u[..]).as_bytes().as_ptr() as *mut c_char;
-        let cpassword = (&p[..]).as_bytes().as_ptr() as *mut c_char;
-        c_scidbconnect(chostname,scidbport,cusername,cpassword,0,sp)
+        c_scidbconnect(chostname.as_ptr(),scidbport,cusername.as_ptr(),cpassword.as_ptr(),0,sp)
     }
 }
 
 fn execute_query(conn : *mut c_void, query : &str) -> (u64, String) {
-    let mut q = String::from(query);
-    q.push('\0');
-    let mut output : [c_char; 1024] = [0; 1024];
+    let cquery = CString::new(query).unwrap();
+    let mut output_buffer : [c_char; MAX_VARLEN] = [0; MAX_VARLEN];
     let (qid, error) = unsafe {
-        let cquery = (&q[..]).as_bytes().as_ptr() as *mut c_char;
-        let output_ptr = &mut output[0] as *mut c_char;
-        let qid = c_executeQuery(conn,cquery,0,output_ptr);
-        let error = std::ffi::CStr::from_ptr(&mut output[0] as *mut c_char);
+        let qid = c_executeQuery(conn,cquery.as_ptr() as *mut c_char,0,output_buffer.as_mut_ptr());
+        let error = CStr::from_ptr(output_buffer.as_mut_ptr());
         (qid, error)
     };
     let error : String = String::from_utf8_lossy(error.to_bytes()).to_string();
