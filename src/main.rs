@@ -14,13 +14,18 @@ enum SciDBConnection {
     Closed(i32)        // content is error status code
 }
 
+enum SciDBQuery {
+    Success(u64),      // content is query ID
+    Error(String)      // content is error string
+}
+
 impl SciDBConnection {
 
     fn new(hostname : &str, username : &str, password : &str, scidbport : i32) -> SciDBConnection {
         scidb_connect(hostname, username, password, scidbport)
     }
 
-    fn execute_query(&mut self, query : &str) -> (u64, String) {
+    fn execute_query(&mut self, query : &str) -> SciDBQuery {
         execute_query(self, query)
     }
 }
@@ -38,13 +43,15 @@ fn main() {
     let mut conn = SciDBConnection::new(hostname, username, password, scidbport);
     if let SciDBConnection::Closed(status) = conn {
         println!("Connection to SciDB failed! status code {status}");
-        std::process::exit(1);
     }
 
     // Run a query...
-    let query = "aio_save(list(\'instances\'),\'/tmp/rusttest\',format:\'tdv\');";
-    let (qid, error) = conn.execute_query(query);
-    println!("Executing SciDB query {qid} -- error string {error}");
+    let querystr = "aio_save(list(\'instances\'),\'/tmp/rusttest\',format:\'tdv\');";
+    let query = conn.execute_query(querystr);
+    match query {
+        SciDBQuery::Error(error) => println!("Error in executing query:\n\n{error}"),
+        SciDBQuery::Success(qid) => println!("Excecuting SciDB query {qid}"),
+    }
 }
 
 fn scidb_connect(hostname : &str, username : &str, password : &str, scidbport : i32) -> SciDBConnection {
@@ -63,7 +70,7 @@ fn scidb_connect(hostname : &str, username : &str, password : &str, scidbport : 
     }
 }
 
-fn execute_query(conn : &mut SciDBConnection, query : &str) -> (u64, String) {
+fn execute_query(conn : &mut SciDBConnection, query : &str) -> SciDBQuery {
     match conn {
         SciDBConnection::Open(c_conn) => {
             let cquery = CString::new(query).unwrap();
@@ -74,12 +81,14 @@ fn execute_query(conn : &mut SciDBConnection, query : &str) -> (u64, String) {
                 (qid, error)
             };
             let error : String = String::from_utf8_lossy(error.to_bytes()).to_string();
-            (qid, error)
+            if !error.is_empty() || qid == 0 {
+                SciDBQuery::Error(error)
+            } else {
+                SciDBQuery::Success(qid)
+            }
         },
         SciDBConnection::Closed(_) => {
-            let qid = 0;
-            let error = String::from("");
-            (qid, error)
+            SciDBQuery::Error(String::from("SciDB connection not open"))
         }
     }
 }
