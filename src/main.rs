@@ -20,11 +20,8 @@ impl SciDBConnection {
         scidb_connect(hostname, username, password, scidbport)
     }
 
-    fn execute_query(&self, query : &str) -> (u64, String) {
-        match self {
-            SciDBConnection::Open(c_conn) => execute_query(c_conn.clone(), query),
-            SciDBConnection::Closed(_) => (0,String::from(""))
-        }
+    fn execute_query(&mut self, query : &str) -> (u64, String) {
+        execute_query(self, query)
     }
 }
 
@@ -38,8 +35,7 @@ fn main() {
     let scidbport = 1239;
 
     // Connect...
-    let conn = SciDBConnection::new(hostname, username, password, scidbport);
-    dbg!(&conn);
+    let mut conn = SciDBConnection::new(hostname, username, password, scidbport);
     if let SciDBConnection::Closed(status) = conn {
         println!("Connection to SciDB failed! status code {status}");
         std::process::exit(1);
@@ -67,14 +63,23 @@ fn scidb_connect(hostname : &str, username : &str, password : &str, scidbport : 
     }
 }
 
-fn execute_query(conn : *mut c_void, query : &str) -> (u64, String) {
-    let cquery = CString::new(query).unwrap();
-    let mut output_buffer : [c_char; MAX_VARLEN] = [0; MAX_VARLEN];
-    let (qid, error) = unsafe {
-        let qid = c_executeQuery(conn,cquery.as_ptr() as *mut c_char,0,output_buffer.as_mut_ptr());
-        let error = CStr::from_ptr(output_buffer.as_mut_ptr());
-        (qid, error)
-    };
-    let error : String = String::from_utf8_lossy(error.to_bytes()).to_string();
-    (qid, error)
+fn execute_query(conn : &mut SciDBConnection, query : &str) -> (u64, String) {
+    match conn {
+        SciDBConnection::Open(c_conn) => {
+            let cquery = CString::new(query).unwrap();
+            let mut output_buffer : [c_char; MAX_VARLEN] = [0; MAX_VARLEN];
+            let (qid, error) = unsafe {
+                let qid = c_executeQuery(c_conn.clone(),cquery.as_ptr() as *mut c_char,0,output_buffer.as_mut_ptr());
+                let error = CStr::from_ptr(output_buffer.as_mut_ptr());
+                (qid, error)
+            };
+            let error : String = String::from_utf8_lossy(error.to_bytes()).to_string();
+            (qid, error)
+        },
+        SciDBConnection::Closed(_) => {
+            let qid = 0;
+            let error = String::from("");
+            (qid, error)
+        }
+    }
 }
