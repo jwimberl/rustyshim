@@ -15,6 +15,11 @@ enum SciDBConnection {
 }
 
 impl SciDBConnection {
+
+    fn new(hostname : &str, username : &str, password : &str, scidbport : i32) -> SciDBConnection {
+        scidb_connect(hostname, username, password, scidbport)
+    }
+
     fn execute_query(&self, query : &str) -> (u64, String) {
         match self {
             SciDBConnection::Open(c_conn) => execute_query(c_conn.clone(), query),
@@ -33,7 +38,7 @@ fn main() {
     let scidbport = 1239;
 
     // Connect...
-    let conn = scidb_connect(hostname, username, password, scidbport);
+    let conn = SciDBConnection::new(hostname, username, password, scidbport);
     dbg!(&conn);
     if let SciDBConnection::Closed(status) = conn {
         println!("Connection to SciDB failed! status code {status}");
