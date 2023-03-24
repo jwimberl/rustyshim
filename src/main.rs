@@ -46,7 +46,7 @@ fn main() {
     }
 
     // Run a query...
-    let querystr = "aio_save(list(\'instances\'),\'/tmp/rusttest\',format:\'tdv\');";
+    let querystr = "aio_save(list('instances'),'/tmp/rusttest',format:'tdv')";
     let query = conn.execute_query(querystr);
     match query {
         SciDBQuery::Error(error) => println!("Error in executing query:\n\n{error}"),
@@ -76,7 +76,7 @@ fn execute_query(conn : &mut SciDBConnection, query : &str) -> SciDBQuery {
             let cquery = CString::new(query).unwrap();
             let mut output_buffer : [c_char; MAX_VARLEN] = [0; MAX_VARLEN];
             let (qid, error) = unsafe {
-                let qid = c_executeQuery(c_conn.clone(),cquery.as_ptr() as *mut c_char,0,output_buffer.as_mut_ptr());
+                let qid = c_executeQuery(c_conn.clone(),cquery.as_ptr() as *mut c_char,1,output_buffer.as_mut_ptr());
                 let error = CStr::from_ptr(output_buffer.as_mut_ptr());
                 (qid, error)
             };
