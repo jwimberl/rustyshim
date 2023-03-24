@@ -1,5 +1,6 @@
 use rustyshim::scidbconnect as c_scidbconnect;
-use rustyshim::executeQuery as c_executeQuery;
+use rustyshim::execute_query as c_execute_query;
+use rustyshim::ShimQueryID;
 
 use std::ffi::CStr;
 use std::ffi::CString;
@@ -15,7 +16,7 @@ enum SciDBConnection {
 }
 
 enum SciDBQuery {
-    Success(u64),      // content is query ID
+    Success(ShimQueryID),      // content is query ID
     Error(String)      // content is error string
 }
 
@@ -50,7 +51,7 @@ fn main() {
     let query = conn.execute_query(querystr);
     match query {
         SciDBQuery::Error(error) => println!("Error in executing query:\n\n{error}"),
-        SciDBQuery::Success(qid) => println!("Excecuting SciDB query {qid}"),
+        SciDBQuery::Success(qid) => println!("Excecuting SciDB query {}.{}",qid.coordinatorid,qid.queryid),
     }
 }
 
@@ -76,12 +77,12 @@ fn execute_query(conn : &mut SciDBConnection, query : &str) -> SciDBQuery {
             let cquery = CString::new(query).unwrap();
             let mut output_buffer : [c_char; MAX_VARLEN] = [0; MAX_VARLEN];
             let (qid, error) = unsafe {
-                let qid = c_executeQuery(c_conn.clone(),cquery.as_ptr() as *mut c_char,1,output_buffer.as_mut_ptr());
+                let qid = c_execute_query(c_conn.clone(),cquery.as_ptr() as *mut c_char,1,output_buffer.as_mut_ptr());
                 let error = CStr::from_ptr(output_buffer.as_mut_ptr());
                 (qid, error)
             };
             let error : String = String::from_utf8_lossy(error.to_bytes()).to_string();
-            if !error.is_empty() || qid == 0 {
+            if !error.is_empty() || qid.queryid == 0 {
                 SciDBQuery::Error(error)
             } else {
                 SciDBQuery::Success(qid)

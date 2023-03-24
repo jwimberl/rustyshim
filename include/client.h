@@ -29,11 +29,11 @@ typedef struct
   unsigned long long queryid;
 } ShimQueryID;
 
-struct prep
+typedef struct
 {
   ShimQueryID queryid;
   void *queryresult;
-};
+} ShimPreppedQuery;
 
 #define SHIM_CONNECTION_SUCCESSFUL  0
 #define SHIM_ERROR_CANT_CONNECT    -1
@@ -47,14 +47,14 @@ void *scidbconnect(
     int isAdmin,
     int* status);
 
-void scidbdisconnect (void *con);
+int scidbdisconnect (void *con);
 
-unsigned long long executeQuery (void *con, char *query, int afl, char *err);
+ShimQueryID execute_query (void *con, const char *query, int afl, char *err);
 
-void prepare_query (void *, void *, char *, int, char *);
+ShimPreppedQuery prepare_query (void *con, const char *query, int afl, char *err);
 
-ShimQueryID execute_prepared_query (void *, char *, struct prep *, int, char *, int);
+int execute_prepared_query (void *con, const char *query, ShimPreppedQuery* pq, int afl, char *err, int);
 
-void completeQuery (struct prep* pq, void *con, char *err);
+void complete_query (void *con, ShimPreppedQuery* pq, char *err);
 
 #endif /* SRC_CLIENT_H_ */
