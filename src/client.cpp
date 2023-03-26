@@ -38,14 +38,12 @@ extern "C"
 #include "rbac/Credential.h"
 
 using namespace std;
-using namespace scidb;
-
 
 /* Connect to a SciDB instance on the specified host and port.
  * Returns a pointer to the SciDB connection context, or NULL
  * if an error occurred.
  */
-extern "C" void * scidbconnect(
+extern "C" void * c_scidb_connect(
     const char *host,
     int port,
     const char* username,
@@ -62,12 +60,12 @@ extern "C" void * scidbconnect(
       if (username == NULL || password == NULL) {
           props.setCredCallback(NULL, NULL); // SDB-6038
       } else {
-          props.setCred(Credential(username, password));
+          props.setCred(scidb::Credential(username, password));
       }
 
       // Set admin, if enabled
       if (isAdmin) {
-          props.setPriority(SessionProperties::ADMIN);
+          props.setPriority(scidb::SessionProperties::ADMIN);
       }
 
       // Attempt to connect
@@ -92,7 +90,7 @@ extern "C" void * scidbconnect(
  * the con pointer should be from the scidbconnect function above.
  * Returns 0 on success and 1 on failure
  */
-extern "C" int scidbdisconnect(void *con)
+extern "C" int c_scidb_disconnect(void *con)
 {
   scidb::SciDBClient& db = scidb::getSciDB();
   try {
@@ -103,131 +101,118 @@ extern "C" int scidbdisconnect(void *con)
   }
 }
 
-/* Execute a query, using the indicated SciDB client connection.
- * con SciDB connection context
- * query A query string to execute
- * afl = 0 use AQL otherwise afl
- * err place any character string errors that occur here
- * Returns a SciDB query ID on success, or zero on error (and writes the
- *  text of the error to the character buffer err).
- */
-extern "C" ShimQueryID
-execute_query(void *con, const char *query, int afl, char *err)
+extern "C" void* c_init_query_result()
 {
-  ShimQueryID qid = {0, 0};
-  scidb::SciDBClient& db = scidb::getSciDB();
-  const string &queryString = (const char *)query;
-  scidb::QueryResult queryResult;
-  try {
-    db.prepareQuery(queryString, bool(afl), "", queryResult, con);
-    db.executeQuery(queryString, bool(afl), queryResult, (void *)con);
-    db.completeQuery(queryResult.queryID, (void *)con);
-    qid.queryid = queryResult.queryID.getId();
-    qid.coordinatorid = queryResult.queryID.getCoordinatorId();
-  } catch(std::exception& e) {
-    snprintf(err,MAX_VARLEN,"%s",e.what());
-  }
+  return static_cast<void*>(new scidb::QueryResult());
+}
+
+extern "C" void c_free_query_result(void *queryresult)
+{
+  auto q = static_cast<scidb::QueryResult*>(queryresult);
+  delete q;
+}
+
+extern "C" QueryID c_query_result_to_id(void *queryresult) {
+  auto q = static_cast<scidb::QueryResult*>(queryresult);
+  QueryID qid {0, 0};
+  qid.queryid = q->queryID.getId();
+  qid.coordinatorid = q->queryID.getCoordinatorId();
   return qid;
 }
 
 /* Prepare a query using the indicated SciDB client connection.
  * result: Pointer to a ShimPreppedQuery, filled in by this function on success
  * con: a scidb connection context
- * afl = 0 use AQL, otherwise AFL.
  * err: a buff of length MAX_VARLEN to hold  error string should one occur
  *
  * Upon returning, either the results structure is populated with a non-NULL
  * queryresult pointer and a valid queryid and the err string is NULL, or
  * ther err string is not NULL and the queryresult is NULL.
  */
-extern "C" ShimPreppedQuery
-prepare_query(void *con, const char *query, int afl, char *err)
+extern "C" int
+c_prepare_query(void *con, const char *query, void *queryresult, char *err)
 {
   // Prepare returned object
-  ShimPreppedQuery result = {{0,0},NULL};
-  result.queryresult = static_cast<void*>(new scidb::QueryResult());
-  if (!result.queryresult) {
-    snprintf(err,MAX_VARLEN,"Unable to allocate query result\n");
-    return result;
+  if (!queryresult) {
+    snprintf(err,MAX_VARLEN,"Invalid query result pointer\n");
+    return SHIM_NO_QUERY_RESULT_OBJ;
   }
 
   // Prepare query
   scidb::SciDBClient& db = scidb::getSciDB();
   const string &queryString = query;
-  auto q = static_cast<scidb::QueryResult*>(result.queryresult);
+  auto q = static_cast<scidb::QueryResult*>(queryresult);
   try {
-    db.prepareQuery(queryString, bool(afl), "", *q, con);
-    result.queryid.queryid = q->queryID.getId();
-    result.queryid.coordinatorid = q->queryID.getCoordinatorId();
+    db.prepareQuery(queryString, true, "", *q, con);
   } catch(std::exception& e) {
-    delete q;
-    result.queryresult = NULL;
     snprintf(err,MAX_VARLEN,"%s",e.what());
+    return SHIM_PREPARATION_ERROR;
   }
 
-  return result;
+  return SHIM_PREPARATION_SUCCESS;
 }
 
 /* Execute a prepared requery stored in the ShimPreppedQuery pq on the scidb
- * connection context con. Set afl to 0 for AQL query, to 1 for AFL query. The
- * char buffer err is a buffer of length MAX_VARLEN on input that will hold an
+ * connection context con.
+ * The char buffer err is a buffer of length MAX_VARLEN on input that will hold an
  * error string on output, should one occur. The queryresult object pointed to
  * from within pq is de-allocated by this function.  Successful exit returns
  * a sQueryID struct.  Failure populates the err buffer with an error string and
  * returns an error code of 1
  */
 extern "C" int
-execute_prepared_query(void *con, const char *query, ShimPreppedQuery *pq, int afl, char *err, int fetch)
+c_execute_prepared_query(void *con, const char *query, void *queryresult, char *err)
 {
   // Examine prepped query
-  const ShimQueryID& qid = pq->queryid;
-  if (!pq->queryresult) {
+  if (!queryresult) {
     snprintf(err,MAX_VARLEN,"Invalid query result object.\n");
-    return 1;
+    return SHIM_NO_QUERY_RESULT_OBJ;
   }
+  auto *qr = static_cast<scidb::QueryResult*>(queryresult);
 
   scidb::SciDBClient& db = scidb::getSciDB();
   const string &queryString = query;
-  auto *q = static_cast<scidb::QueryResult*>(pq->queryresult);
-  q->fetch = (fetch != 0);
   try {
-    db.executeQuery(queryString, bool(afl), *q, (void *)con);
+    db.executeQuery(queryString, true, *qr, (void *)con);
   } catch (scidb::RollbackException const& rbe) {
     // SDB-7521: RollbackException indicates that a transaction was rolled back successfully
     // in response to a user's rollback() command. So the rollback() query was successful, and
     // shim should return the query ID to the client, like it does with a normal successful query.
     //
     // However, we can't call completeQuery() on the query, because it was rolled back.
-    // So we delete pq->queryresult and set it to NULL to tell the caller not to run completeQuery().
-    delete q;
-    pq->queryresult = NULL;
+    // So we return an error code to tell the caller not to run completeQuery().
+    return SHIM_TRANSACTION_ROLLBACK;
   } catch (std::exception const& e) {
     snprintf(err,MAX_VARLEN,"%s",e.what());
-    delete q;
-    pq->queryresult = NULL;
-    return 1;
+    return SHIM_EXECUTION_ERROR;
   }
-  return 0;
+  return SHIM_EXECUTION_SUCCESS;
 }
 
-extern "C" void complete_query(void *con, ShimPreppedQuery* pq, char *err)
+extern "C" int c_complete_query(void *con, void *queryresult, char *err)
 {
-  scidb::QueryResult *qr = (scidb::QueryResult *)pq->queryresult;
-  if (!qr->queryID.isValid() || qr->autoCommit) {
-    delete qr;
-    pq->queryresult = NULL;
-    return;
+  // Examine prepped/executed query
+  if (!queryresult) {
+    snprintf(err,MAX_VARLEN,"Invalid query result object.\n");
+    return SHIM_NO_QUERY_RESULT_OBJ;
   }
+  auto *qr = static_cast<scidb::QueryResult*>(queryresult);
 
-  ShimQueryID qid = pq->queryid;
+  if (!qr->queryID.isValid()) {
+    return SHIM_COMPLETION_INVALID;
+  }
+  
+  if (qr->autoCommit) {
+    return SHIM_COMPLETION_SUCCESS; // not an error
+  } else {
   scidb::SciDBClient& db = scidb::getSciDB();
-  scidb::QueryID q = scidb::QueryID(qid.coordinatorid, qid.queryid);
-  try {
-    db.completeQuery(q, (void *)con);
-  } catch(std::exception& e) {
-    snprintf(err,MAX_VARLEN,"%s",e.what());
+    try {
+      db.completeQuery(qr->queryID, (void *)con);
+    } catch(std::exception& e) {
+      snprintf(err,MAX_VARLEN,"%s",e.what());
+      return SHIM_COMPLETION_ERROR;
+    }
   }
 
-  delete qr;
-  pq->queryresult = NULL;
+  return SHIM_COMPLETION_SUCCESS;
 }

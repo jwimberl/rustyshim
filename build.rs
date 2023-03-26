@@ -7,7 +7,7 @@ fn main() {
     // Build client.o
     cc::Build::new()
         .cpp(true)
-        .define("PROJECT_ROOT","\"/opt/scidb/22.5\"")
+        .define("PROJECT_ROOT", "\"/opt/scidb/22.5\"")
         .define("SCIDB_CLIENT", "1")
         .include("/opt/scidb/22.5/include")
         .include("include")

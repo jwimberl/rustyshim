@@ -23,23 +23,17 @@
 #define SRC_CLIENT_H_
 
 // Minimalist SciDB client API
-typedef struct
+struct QueryID
 {
   unsigned long long coordinatorid;
   unsigned long long queryid;
-} ShimQueryID;
-
-typedef struct
-{
-  ShimQueryID queryid;
-  void *queryresult;
-} ShimPreppedQuery;
+};
 
 #define SHIM_CONNECTION_SUCCESSFUL  0
 #define SHIM_ERROR_CANT_CONNECT    -1
 #define SHIM_ERROR_AUTHENTICATION  -2
 
-void *scidbconnect(
+void *c_scidb_connect(
     const char *host,
     int port,
     const char* username,
@@ -47,14 +41,32 @@ void *scidbconnect(
     int isAdmin,
     int* status);
 
-int scidbdisconnect (void *con);
+int c_scidb_disconnect (void *con);
 
-ShimQueryID execute_query (void *con, const char *query, int afl, char *err);
+void* c_init_query_result();
 
-ShimPreppedQuery prepare_query (void *con, const char *query, int afl, char *err);
+void c_free_query_result(void *queryresult);
 
-int execute_prepared_query (void *con, const char *query, ShimPreppedQuery* pq, int afl, char *err, int);
+struct QueryID c_query_result_to_id(void *queryresult);
 
-void complete_query (void *con, ShimPreppedQuery* pq, char *err);
+#define SHIM_PREPARATION_SUCCESS    0
+#define SHIM_NO_QUERY_RESULT_OBJ   -1
+#define SHIM_PREPARATION_ERROR     -2
+
+int c_prepare_query (void *con, const char *query, void *queryresult, char *err);
+
+#define SHIM_EXECUTION_SUCCESS      0
+#define SHIM_TRANSACTION_ROLLBACK  -3
+#define SHIM_EXECUTION_ERROR       -4
+
+int c_execute_prepared_query (void *con, const char *query, void *queryresult, char *err);
+
+#define SHIM_COMPLETION_SUCCESS     0
+#define SHIM_COMPLETION_INVALID    -5
+#define SHIM_COMPLETION_ERROR      -6
+
+int c_complete_query (void *con, void *queryresult, char *err);
+
+#define SHIM_NO_SCIDB_CONNECTION   -7
 
 #endif /* SRC_CLIENT_H_ */
