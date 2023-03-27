@@ -106,11 +106,6 @@ pub struct QueryError {
     pub explanation: String,
 }
 
-pub enum QueryExecutionResult {
-    Success(QueryID),
-    Failure(QueryError),
-}
-
 impl SciDBConnection {
     // Preparation step
     pub fn prepare_query(&mut self, query: &str, result: &QueryResult) -> Option<QueryError> {
@@ -205,27 +200,27 @@ impl SciDBConnection {
     }
 
     // All-in-one method
-    pub fn execute_query(&mut self, query: &str) -> QueryExecutionResult {
+    pub fn execute_query(&mut self, query: &str) -> Result<QueryID,QueryError> {
         let mut qr = QueryResult::new();
 
         // Prep
         let error = self.prepare_query(&query, &mut qr);
         if let Some(error) = error {
-            return QueryExecutionResult::Failure(error);
+            return Err(error);
         }
 
         // Execute
         let error = self.execute_prepared_query(&query, &mut qr);
         if let Some(error) = error {
-            return QueryExecutionResult::Failure(error);
+            return Err(error);
         }
 
         // Complete
         let error = self.complete_query(&mut qr);
         if let Some(error) = error {
-            return QueryExecutionResult::Failure(error);
+            return Err(error);
         }
 
-        QueryExecutionResult::Success(qr.id())
+        Ok(qr.id())
     }
 }

@@ -1,5 +1,4 @@
 use rustyshim::SciDBConnection;
-use rustyshim::QueryExecutionResult;
 
 fn main() {
     println!("Hello, world!");
@@ -20,11 +19,11 @@ fn main() {
     let querystr = "aio_save(list('instances'),'/tmp/rusttest',format:'tdv')";
     let query = conn.execute_query(querystr);
     match query {
-        QueryExecutionResult::Failure(error) => println!(
+        Err(error) => println!(
             "Error code {} in executing query:\n\n{}",
             error.code, error.explanation
         ),
-        QueryExecutionResult::Success(qid) => {
+        Ok(qid) => {
             println!("Executed SciDB query {}.{}", qid.coordinatorid, qid.queryid)
         }
     }
