@@ -1,8 +1,15 @@
 include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 
+use std::io;
+use std::io::Error;
+use std::io::ErrorKind;
+
 use std::ffi::CStr;
 use std::ffi::CString;
 use std::os::raw::c_void;
+
+use arrow::ipc;
+use arrow::util::pretty::print_batches;
 
 const MAX_VARLEN: usize = 4096;
 
@@ -26,15 +33,17 @@ const MAX_VARLEN: usize = 4096;
  * associated client.h and client.cpp files
  */
 
-// SciDBConnection
+/////////////////////
+// SciDBConnection //
+/////////////////////
 
 pub struct SciDBConnectionPtr {
-    c_ptr : *mut c_void
+    c_ptr: *mut c_void,
 }
 
 pub enum SciDBConnection {
     Open(SciDBConnectionPtr), // content is non-null pointer to be disconnected at drop
-    Closed(i32),       // content is error status code
+    Closed(i32),              // content is error status code
 }
 
 impl SciDBConnection {
@@ -55,7 +64,7 @@ impl SciDBConnection {
             )
         };
         if status == 0 && c_conn != 0 as *mut c_void {
-            return SciDBConnection::Open(SciDBConnectionPtr{c_ptr : c_conn});
+            return SciDBConnection::Open(SciDBConnectionPtr { c_ptr: c_conn });
         } else {
             return SciDBConnection::Closed(status);
         }
@@ -73,7 +82,9 @@ impl Drop for SciDBConnection {
     }
 }
 
-// QueryResult
+/////////////////
+// QueryResult //
+/////////////////
 
 pub struct QueryResult {
     ptr: *mut c_void, // content is non-null pointer to C++ object to be deleted at Drop
@@ -99,7 +110,9 @@ impl Drop for QueryResult {
     }
 }
 
-// Query exection methods on SciDBConnection
+///////////////////////////////////////////////
+// Query exection methods on SciDBConnection //
+///////////////////////////////////////////////
 
 pub struct QueryError {
     pub code: i32,
@@ -115,12 +128,7 @@ impl SciDBConnection {
                 let mut errbuf = vec![0; MAX_VARLEN];
                 let errbufptr = errbuf.as_mut_ptr() as *mut i8;
                 let code = unsafe {
-                    c_prepare_query(
-                        c_conn.c_ptr.clone(),
-                        cquery.as_ptr(),
-                        result.ptr,
-                        errbufptr,
-                    )
+                    c_prepare_query(c_conn.c_ptr.clone(), cquery.as_ptr(), result.ptr, errbufptr)
                 };
                 let error = unsafe { CStr::from_ptr(errbufptr) };
                 let error: String = String::from_utf8_lossy(error.to_bytes()).to_string();
@@ -135,13 +143,17 @@ impl SciDBConnection {
             }
             SciDBConnection::Closed(_) => Some(QueryError {
                 code: SHIM_NO_SCIDB_CONNECTION,
-                explanation: String::from("SciDB connection not open"),
+                explanation: "SciDB connection not open".to_owned(),
             }),
         }
     }
 
     // Post-preparation execution
-    pub fn execute_prepared_query(&mut self, query: &str, result: &QueryResult) -> Option<QueryError> {
+    pub fn execute_prepared_query(
+        &mut self,
+        query: &str,
+        result: &QueryResult,
+    ) -> Option<QueryError> {
         match self {
             SciDBConnection::Open(c_conn) => {
                 let cquery = CString::new(query).unwrap();
@@ -168,7 +180,7 @@ impl SciDBConnection {
             }
             SciDBConnection::Closed(_) => Some(QueryError {
                 code: SHIM_NO_SCIDB_CONNECTION,
-                explanation: String::from("SciDB connection not open"),
+                explanation: "SciDB connection not open".to_owned(),
             }),
         }
     }
@@ -179,8 +191,7 @@ impl SciDBConnection {
             SciDBConnection::Open(c_conn) => {
                 let mut errbuf = vec![0; MAX_VARLEN];
                 let errbufptr = errbuf.as_mut_ptr() as *mut i8;
-                let code =
-                    unsafe { c_complete_query(c_conn.c_ptr.clone(), result.ptr, errbufptr) };
+                let code = unsafe { c_complete_query(c_conn.c_ptr.clone(), result.ptr, errbufptr) };
                 let error = unsafe { CStr::from_ptr(errbufptr) };
                 let error: String = String::from_utf8_lossy(error.to_bytes()).to_string();
                 if code == 0 && error.is_empty() {
@@ -194,13 +205,13 @@ impl SciDBConnection {
             }
             SciDBConnection::Closed(_) => Some(QueryError {
                 code: SHIM_NO_SCIDB_CONNECTION,
-                explanation: String::from("SciDB connection not open"),
+                explanation: "SciDB connection not open".to_owned(),
             }),
         }
     }
 
     // All-in-one method
-    pub fn execute_query(&mut self, query: &str) -> Result<QueryID,QueryError> {
+    pub fn execute_query(&mut self, query: &str) -> Result<QueryID, QueryError> {
         let mut qr = QueryResult::new();
 
         // Prep
@@ -222,5 +233,77 @@ impl SciDBConnection {
         }
 
         Ok(qr.id())
+    }
+}
+
+////////////////
+// AioQuery //
+////////////////
+
+/* Wrap a generic query with AIO to save its output
+ * to a temporary file in arrow format;
+ */
+
+struct AioQuery {
+    pub query: String,
+    buffer: tempfile::TempPath,
+}
+
+impl AioQuery {
+    pub fn new(query: &str) -> io::Result<AioQuery> {
+        let buffer = tempfile::NamedTempFile::new()?;
+        let path = buffer.into_temp_path(); // consumes and closes buffer();
+        let pathstr = path.to_str().ok_or(Error::new(
+            ErrorKind::Other,
+            "cannot convert path to string",
+        ))?;
+
+        let mut save_string = "aio_save(".to_owned();
+        save_string.push_str(query);
+        save_string.push_str(", '");
+        save_string.push_str(pathstr);
+        save_string.push_str("', format:'arrow')");
+        Ok(AioQuery {
+            query: save_string,
+            buffer: path,
+        })
+    }
+}
+
+impl SciDBConnection {
+    pub fn execute_aio_query(&mut self, query: &str) -> Result<QueryID, QueryError> {
+        let aio = AioQuery::new(query);
+        match aio {
+            Ok(aio) => {
+                let res = self.execute_query(&aio.query);
+                let file = std::fs::File::open(&aio.buffer);
+                match file {
+                    Ok(file) => {
+                        let mut ipc_reader = ipc::reader::StreamReader::try_new(file, None);
+                        match &mut ipc_reader {
+                            Ok(ipc_reader) => {
+                                while let Some(batch) = ipc_reader.next() {
+                                    println!("Next batch:");
+                                    print_batches(&[batch.unwrap()]).unwrap();
+                                }
+                                res
+                            }
+                            Err(e) => Err(QueryError {
+                                code: SHIM_IO_ERROR,
+                                explanation: e.to_string(),
+                            }),
+                        }
+                    }
+                    Err(e) => Err(QueryError {
+                        code: SHIM_IO_ERROR,
+                        explanation: e.to_string(),
+                    }),
+                }
+            }
+            Err(e) => Err(QueryError {
+                code: SHIM_IO_ERROR,
+                explanation: e.to_string(),
+            }),
+        }
     }
 }

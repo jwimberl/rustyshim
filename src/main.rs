@@ -16,9 +16,9 @@ fn main() {
     }
 
     // Run a query...
-    let querystr = "aio_save(list('instances'),'/tmp/rusttest',format:'tdv')";
-    let query = conn.execute_query(querystr);
-    match query {
+    let query = "build(<value:int64> [i=0:10:0:10;j=0:10:0:10],i*j)";
+    let res = conn.execute_aio_query(&query);
+    match res {
         Err(error) => println!(
             "Error code {} in executing query:\n\n{}",
             error.code, error.explanation
