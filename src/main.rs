@@ -1,5 +1,7 @@
 use rustyshim::SciDBConnection;
 
+use arrow::util::pretty::print_batches;
+
 fn main() {
     println!("Hello, world!");
 
@@ -23,8 +25,16 @@ fn main() {
             "Error code {} in executing query:\n\n{}",
             error.code, error.explanation
         ),
-        Ok(qid) => {
-            println!("Executed SciDB query {}.{}", qid.coordinatorid, qid.queryid)
+        Ok(aio) => {
+            println!(
+                "Executed SciDB query {}.{}",
+                aio.qid.coordinatorid, aio.qid.queryid
+            );
+            // at this point data is still on-disk in buffer file
+            let data = aio.to_batches().unwrap(); // consumes buffer file, data lives in memory
+            for batch in data {
+                print_batches(&[batch.unwrap()]).unwrap();
+            }
         }
     }
 }

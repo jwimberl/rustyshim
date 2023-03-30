@@ -1,16 +1,12 @@
 include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 
-use std::io;
-use std::io::Error;
-use std::io::ErrorKind;
-
 use std::ffi::CStr;
 use std::ffi::CString;
 use std::os::raw::c_void;
 
-use arrow::ipc;
-use arrow::util::pretty::print_batches;
 use arrow::error::ArrowError;
+use arrow::ipc;
+use arrow::record_batch::RecordBatch;
 
 const MAX_VARLEN: usize = 4096;
 
@@ -115,6 +111,7 @@ impl Drop for QueryResult {
 // Query exection methods on SciDBConnection //
 ///////////////////////////////////////////////
 
+#[derive(Debug)]
 pub struct QueryError {
     pub code: i32,
     pub explanation: String,
@@ -263,42 +260,67 @@ impl From<ArrowError> for QueryError {
     }
 }
 
-struct AioQuery {
-    pub query: String,
-    buffer: tempfile::TempPath,
+pub struct AioQuery {
+    pub qid: QueryID,
+    buffer_path: tempfile::TempPath,
 }
 
 impl AioQuery {
-    pub fn new(query: &str) -> io::Result<AioQuery> {
+    pub fn new() -> Result<AioQuery, QueryError> {
         let buffer = tempfile::NamedTempFile::new()?;
         let path = buffer.into_temp_path(); // consumes and closes buffer();
-        let pathstr = path.to_str().ok_or(Error::new(
-            ErrorKind::Other,
-            "cannot convert path to string",
-        ))?;
+        return Ok(AioQuery {
+            qid: QueryID {
+                queryid: 0,
+                coordinatorid: 0,
+            },
+            buffer_path: path,
+        });
+    }
 
-        let mut save_string = "aio_save(".to_owned();
-        save_string.push_str(query);
-        save_string.push_str(", '");
-        save_string.push_str(pathstr);
-        save_string.push_str("', format:'arrow')");
-        Ok(AioQuery {
-            query: save_string,
-            buffer: path,
-        })
+    pub fn query_str(&self, query: &str) -> Option<String> {
+        let pathstr = self.buffer_path.to_str()?;
+        let mut aio_query = "aio_save(".to_owned();
+        aio_query.push_str(query);
+        aio_query.push_str(", '");
+        aio_query.push_str(pathstr);
+        aio_query.push_str("', format:'arrow')");
+        Some(aio_query)
+    }
+
+    pub fn to_batches(self) -> Result<Vec<Result<RecordBatch, ArrowError>>, QueryError> {
+        self.into()
+    }
+}
+
+impl Into<Result<Vec<Result<RecordBatch, ArrowError>>, QueryError>> for AioQuery {
+    fn into(self) -> Result<Vec<Result<RecordBatch, ArrowError>>, QueryError> {
+        let pathstr = self.buffer_path.to_str().ok_or(QueryError {
+            code: SHIM_IO_ERROR,
+            explanation: "cannot convert path to string".to_owned(),
+        })?;
+        let file = std::fs::File::open(&pathstr)?;
+        let ipc_reader = ipc::reader::StreamReader::try_new(file, None)?;
+        let batches: Vec<Result<RecordBatch, ArrowError>> = ipc_reader.collect();
+        Ok(batches)
     }
 }
 
 impl SciDBConnection {
-    pub fn execute_aio_query(&mut self, query: &str) -> Result<QueryID, QueryError> {
-        let aio = AioQuery::new(query)?;
-        let res = self.execute_query(&aio.query);
-        let file = std::fs::File::open(&aio.buffer)?;
-        let ipc_reader = ipc::reader::StreamReader::try_new(file, None)?;
-        let batches: Vec<_> = ipc_reader.collect();
-        for batch in batches {
-            print_batches(&[batch.unwrap()]).unwrap();
-        }
-        res
+    pub fn execute_aio_query(&mut self, query: &str) -> Result<AioQuery, QueryError> {
+        // Create AioQuery buffer and get path
+        let mut aio = AioQuery::new()?;
+
+        // Wrap AFL to save it to the buffer file in arrow format
+        let aio_query = aio.query_str(query).ok_or(QueryError {
+            code: SHIM_IO_ERROR,
+            explanation: "cannot convert path to string".to_owned(),
+        })?;
+
+        // Execute the SciDB query, saving data to the buffer file
+        aio.qid = self.execute_query(&aio_query)?;
+
+        // Return QueryID result
+        Ok(aio)
     }
 }
