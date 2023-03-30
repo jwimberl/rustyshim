@@ -70,5 +70,6 @@ int c_complete_query (void *con, void *queryresult, char *err);
 #define SHIM_NO_SCIDB_CONNECTION   -7
 
 #define SHIM_IO_ERROR              -8
+#define SHIM_ARROW_ERROR           -9
 
 #endif /* SRC_CLIENT_H_ */

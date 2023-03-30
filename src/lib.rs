@@ -10,6 +10,7 @@ use std::os::raw::c_void;
 
 use arrow::ipc;
 use arrow::util::pretty::print_batches;
+use arrow::error::ArrowError;
 
 const MAX_VARLEN: usize = 4096;
 
@@ -244,6 +245,24 @@ impl SciDBConnection {
  * to a temporary file in arrow format;
  */
 
+impl From<std::io::Error> for QueryError {
+    fn from(e: std::io::Error) -> Self {
+        Self {
+            code: SHIM_IO_ERROR,
+            explanation: e.to_string(),
+        }
+    }
+}
+
+impl From<ArrowError> for QueryError {
+    fn from(e: ArrowError) -> Self {
+        Self {
+            code: SHIM_ARROW_ERROR,
+            explanation: e.to_string(),
+        }
+    }
+}
+
 struct AioQuery {
     pub query: String,
     buffer: tempfile::TempPath,
@@ -272,38 +291,14 @@ impl AioQuery {
 
 impl SciDBConnection {
     pub fn execute_aio_query(&mut self, query: &str) -> Result<QueryID, QueryError> {
-        let aio = AioQuery::new(query);
-        match aio {
-            Ok(aio) => {
-                let res = self.execute_query(&aio.query);
-                let file = std::fs::File::open(&aio.buffer);
-                match file {
-                    Ok(file) => {
-                        let mut ipc_reader = ipc::reader::StreamReader::try_new(file, None);
-                        match &mut ipc_reader {
-                            Ok(ipc_reader) => {
-                                while let Some(batch) = ipc_reader.next() {
-                                    println!("Next batch:");
-                                    print_batches(&[batch.unwrap()]).unwrap();
-                                }
-                                res
-                            }
-                            Err(e) => Err(QueryError {
-                                code: SHIM_IO_ERROR,
-                                explanation: e.to_string(),
-                            }),
-                        }
-                    }
-                    Err(e) => Err(QueryError {
-                        code: SHIM_IO_ERROR,
-                        explanation: e.to_string(),
-                    }),
-                }
-            }
-            Err(e) => Err(QueryError {
-                code: SHIM_IO_ERROR,
-                explanation: e.to_string(),
-            }),
+        let aio = AioQuery::new(query)?;
+        let res = self.execute_query(&aio.query);
+        let file = std::fs::File::open(&aio.buffer)?;
+        let ipc_reader = ipc::reader::StreamReader::try_new(file, None)?;
+        let batches: Vec<_> = ipc_reader.collect();
+        for batch in batches {
+            print_batches(&[batch.unwrap()]).unwrap();
         }
+        res
     }
 }
