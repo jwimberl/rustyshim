@@ -33,7 +33,7 @@ fn main() {
             // at this point data is still on-disk in buffer file
             let data = aio.to_batches().unwrap(); // consumes buffer file, data lives in memory
             for batch in data {
-                print_batches(&[batch.unwrap()]).unwrap();
+                print_batches(&[batch]).unwrap();
             }
         }
     }

@@ -288,21 +288,27 @@ impl AioQuery {
         Some(aio_query)
     }
 
-    pub fn to_batches(self) -> Result<Vec<Result<RecordBatch, ArrowError>>, QueryError> {
+    pub fn to_batches(self) -> Result<Vec<RecordBatch>, QueryError> {
         self.into()
     }
 }
 
-impl Into<Result<Vec<Result<RecordBatch, ArrowError>>, QueryError>> for AioQuery {
-    fn into(self) -> Result<Vec<Result<RecordBatch, ArrowError>>, QueryError> {
+impl Into<Result<Vec<RecordBatch>, QueryError>> for AioQuery {
+    fn into(self) -> Result<Vec<RecordBatch>, QueryError> {
         let pathstr = self.buffer_path.to_str().ok_or(QueryError {
             code: SHIM_IO_ERROR,
             explanation: "cannot convert path to string".to_owned(),
         })?;
         let file = std::fs::File::open(&pathstr)?;
         let ipc_reader = ipc::reader::StreamReader::try_new(file, None)?;
-        let batches: Vec<Result<RecordBatch, ArrowError>> = ipc_reader.collect();
-        Ok(batches)
+        let batches: Vec<_> = ipc_reader.collect();
+        let mut filtered_batches: Vec<RecordBatch> = vec![];
+        for batch in batches {
+            let goodbatch = batch?;
+            filtered_batches.push(goodbatch);
+        }
+
+        Ok(filtered_batches)
     }
 }
 
