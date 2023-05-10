@@ -55,7 +55,9 @@ async fn main() {
     let ctx = SessionContext::new();
 
     // Run queries and register as DataFusion tables
+    let db_start = Instant::now();
     for arr in config.arrays {
+        let q_start = Instant::now();
         let res = conn.execute_aio_query(&arr.afl);
         match res {
             Err(error) => println!(
@@ -67,6 +69,8 @@ async fn main() {
                     "Executed SciDB query {}.{}",
                     aio.qid.coordinatorid, aio.qid.queryid
                 );
+                let q_duration = q_start.elapsed();
+                println!("Elapsed SciDB query duration: {:?}", q_duration);
                 // at this point data is still on-disk in buffer file
                 let data = aio.to_batches().unwrap(); // consumes buffer file, data lives in memory
                 // todo: should check that array length is > 0
@@ -81,6 +85,8 @@ async fn main() {
             }
         }
     }
+    let db_duration = db_start.elapsed();
+    println!("Elapsed database construction duration: {:?}", db_duration);
 
     // Loop and run dataFusion queries...
     loop {
@@ -109,7 +115,7 @@ async fn main() {
                 df.show().await.unwrap();
             }
         }
-        println!("Query time is: {:?}", duration);
+        println!("Elapsed query duration: {:?}", duration);
 
     }
 }
