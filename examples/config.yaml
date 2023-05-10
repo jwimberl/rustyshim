@@ -1,0 +1,5 @@
+arrays:
+  - name: ex1
+    afl: apply(build(<value:int64> [i=0:10:0:10;j=0:10:0:10],i*j),i,i,j,j)
+  - name: ex2
+    afl: apply(build(<value:int64> [i=0:10:0:10;j=0:10:0:10],i+j),i,i,j,j)

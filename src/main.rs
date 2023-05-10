@@ -1,9 +1,13 @@
 use std::env;
+use std::io;
+use std::io::Write;
 use rustyshim::SciDBConnection;
 use datafusion::prelude::*;
 use tokio; // 0.3.5
 use serde_yaml;
 use serde::{Serialize, Deserialize};
+
+// Configuration format //
 
 #[derive(Serialize, Deserialize, Debug)]
 struct SciDBArray {
@@ -16,11 +20,25 @@ struct ShimConfig {
     arrays: Vec<SciDBArray>
 }
 
+use clap::Parser;
+
+/// Search for a pattern in a file and display the lines that contain it.
+#[derive(Parser)]
+struct Args {
+    /// The path to the YAML config file to read
+    config: std::path::PathBuf,
+}
+
+// Main function //
+
 #[tokio::main]
 async fn main() {
-    println!("Hello, world!");
+    // Parse CLI arguments and read YAML config
+    let args = Args::parse();
+    let conff = std::fs::File::open(&args.config).unwrap();
+    let config: ShimConfig = serde_yaml::from_reader(conff).unwrap();
 
-    // Config...
+    // SciDB connection config...
     let hostname = match env::var("SCIDB_HOST") { Err(_) => String::from("localhost"), Ok(host) => host };
     let username = match env::var("SCIDB_USER") { Err(_) => String::from("scidbadmin"), Ok(user) => user };
     let password = match env::var("SCIDB_PASSWORD") { Err(_) => String::from(""), Ok(passwd) => passwd };
@@ -34,14 +52,6 @@ async fn main() {
 
     // Create a DataFusion context
     let ctx = SessionContext::new();
-    let example_yaml = "
-      arrays:
-        - name: ex1
-          afl: apply(build(<value:int64> [i=0:10:0:10;j=0:10:0:10],i*j),i,i,j,j)
-        - name: ex2
-          afl: apply(build(<value:int64> [i=0:10:0:10;j=0:10:0:10],i+j),i,i,j,j)
-    ";
-    let config: ShimConfig = serde_yaml::from_str(example_yaml).unwrap();
 
     // Run queries and register as DataFusion tables
     for arr in config.arrays {
@@ -71,15 +81,28 @@ async fn main() {
         }
     }
 
-    // Run a DataFusion query...
-    let results = ctx.sql("SELECT ex1.i, ex1.j, ex2.i, ex2.j FROM ex1 INNER JOIN ex2 ON ex1.value = ex2.value").await;
-    match results {
-        Err(error) => println!(
-            "Error while running SQL via DataFusion:\n\n{}",
-            error
-        ),
-        Ok(df) => {
-            df.show().await.unwrap();
+    // Loop and run dataFusion queries...
+    loop {
+        print!(">> ");
+        let _ = io::stdout().flush();
+
+        // Get user query from STDIN
+        // Example: "SELECT ex1.i, ex1.j, ex2.i, ex2.j FROM ex1 INNER JOIN ex2 ON ex1.value = ex2.value"
+        let mut query = String::new();
+        io::stdin()
+            .read_line(&mut query)
+            .expect("Failed to read line");
+
+        let results = ctx.sql(&query).await;
+        match results {
+            Err(error) => println!(
+                "Error while running SQL via DataFusion:\n\n{}",
+                error
+            ),
+            Ok(df) => {
+                df.show().await.unwrap();
+            }
         }
+
     }
 }
