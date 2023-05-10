@@ -1,6 +1,7 @@
 use std::env;
 use std::io;
 use std::io::Write;
+use std::time::{Instant};
 use rustyshim::SciDBConnection;
 use datafusion::prelude::*;
 use tokio; // 0.3.5
@@ -93,7 +94,12 @@ async fn main() {
             .read_line(&mut query)
             .expect("Failed to read line");
 
+        // Run and time the query
+        let start = Instant::now();
         let results = ctx.sql(&query).await;
+        let duration = start.elapsed();
+
+        // Print results
         match results {
             Err(error) => println!(
                 "Error while running SQL via DataFusion:\n\n{}",
@@ -103,6 +109,7 @@ async fn main() {
                 df.show().await.unwrap();
             }
         }
+        println!("Query time is: {:?}", duration);
 
     }
 }
