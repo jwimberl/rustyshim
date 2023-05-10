@@ -12,3 +12,5 @@ bindgen = "0.53.1"
 [dependencies]
 arrow = { version = "36.0.0", features = ["prettyprint"] }
 tempfile = "3.4.0"
+datafusion = "22"
+tokio = "1.0"
