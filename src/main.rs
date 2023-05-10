@@ -1,3 +1,4 @@
+use std::env;
 use rustyshim::SciDBConnection;
 use datafusion::prelude::*;
 use tokio; // 0.3.5
@@ -7,13 +8,13 @@ async fn main() {
     println!("Hello, world!");
 
     // Config...
-    let hostname = "localhost";
-    let username = "scidbadmin";
-    let password = ""; // does not matter in trust mode
-    let scidbport = 1239;
+    let hostname = match env::var("SCIDB_HOST") { Err(_) => String::from("localhost"), Ok(host) => host };
+    let username = match env::var("SCIDB_USER") { Err(_) => String::from("scidbadmin"), Ok(user) => user };
+    let password = match env::var("SCIDB_PASSWORD") { Err(_) => String::from(""), Ok(passwd) => passwd };
+    let scidbport = match env::var("SCIDB_PORT") {Err(_) => 1239, Ok(port) => port.parse::<i32>().unwrap() };
 
     // Connect to SciDB...
-    let mut conn = SciDBConnection::new(hostname, username, password, scidbport);
+    let mut conn = SciDBConnection::new(&hostname, &username, &password, scidbport);
     if let SciDBConnection::Closed(status) = conn {
         panic!("Connection to SciDB failed! status code {status}");
     }
