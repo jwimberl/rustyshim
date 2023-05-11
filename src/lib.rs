@@ -4,9 +4,9 @@ use std::ffi::CStr;
 use std::ffi::CString;
 use std::os::raw::c_void;
 
-use arrow::error::ArrowError;
-use arrow::ipc;
-use arrow::record_batch::RecordBatch;
+use datafusion::arrow::error::ArrowError;
+use datafusion::arrow::ipc;
+use datafusion::arrow::record_batch::RecordBatch;
 
 const MAX_VARLEN: usize = 4096;
 
