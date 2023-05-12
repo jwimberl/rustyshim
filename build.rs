@@ -5,12 +5,26 @@ use std::path::PathBuf;
 
 fn main() {
     // Build client.o
+    let scidb_ver = env::var("SCIDB_VER").unwrap();
+    let mut scidb_path = String::from("/opt/scidb/");
+    scidb_path.push_str(&scidb_ver);
+    scidb_path.push_str("/include");
+    let mut scidb_lpath = String::from("/opt/scidb/");
+    scidb_lpath.push_str(&scidb_ver);
+    scidb_lpath.push_str("/lib");
+    let mut project_root = String::from("\"");
+    project_root.push_str(&scidb_path);
+    project_root.push_str("\"");
+    let postgres_ver = env::var("POSTGRES_VER").unwrap();
+    let mut postgres_path = String::from("/usr/pgsql-");
+    postgres_path.push_str(&postgres_ver);
+    postgres_path.push_str("/include");
     cc::Build::new()
         .cpp(true)
-        .define("PROJECT_ROOT", "\"/opt/scidb/22.5\"")
+        .define("PROJECT_ROOT", &project_root[..])
         .define("SCIDB_CLIENT", "1")
-        .include("/opt/scidb/22.5/include")
-        .include("/usr/pgsql-9.3/include")
+        .include(&scidb_path[..])
+        .include(&postgres_path[..])
         .include("/usr/include/boost169")
         .include("extern")
         .file("src/client.cpp")
@@ -43,6 +57,6 @@ fn main() {
 
     // Linking scidb
     // Our libclient.a will be linked automatically
-    println!("cargo:rustc-link-search=native=/opt/scidb/22.5/lib");
+    println!("cargo:rustc-link-search=native={}",scidb_lpath);
     println!("cargo:rustc-link-lib=scidbclient");
 }
