@@ -2247,10 +2247,13 @@ name = "rustyshim"
 version = "0.1.0"
 dependencies = [
  "arrow-flight",
+ "arrow-ipc",
  "bindgen",
+ "bytes",
  "cc",
  "clap 4.2.7",
  "datafusion",
+ "datafusion-common",
  "futures",
  "serde",
  "serde_yaml",
