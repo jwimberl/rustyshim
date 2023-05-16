@@ -1,12 +1,12 @@
 include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 
-use std::ffi::CStr;
-use std::ffi::CString;
-use std::os::raw::c_void;
-
 use datafusion::arrow::error::ArrowError;
 use datafusion::arrow::ipc;
 use datafusion::arrow::record_batch::RecordBatch;
+use std::ffi::CStr;
+use std::ffi::CString;
+use std::os::raw::c_void;
+use std::time::{Duration, Instant};
 
 const MAX_VARLEN: usize = 4096;
 
@@ -34,22 +34,67 @@ const MAX_VARLEN: usize = 4096;
 // SciDBConnection //
 /////////////////////
 
-pub struct SciDBConnectionPtr {
+pub struct SciDBConnection {
+    start: Instant,
     c_ptr: *mut c_void,
 }
 
-pub enum SciDBConnection {
-    Open(SciDBConnectionPtr), // content is non-null pointer to be disconnected at drop
-    Closed(i32),              // content is error status code
+#[derive(Debug)]
+pub enum SciDBError {
+    ConnectionError(i32),
+    QueryError { code: i32, explanation: String },
+    NulError(std::ffi::NulError),
+    IoError(std::io::Error),
+    ArrowError(ArrowError),
+}
+
+impl From<std::ffi::NulError> for SciDBError {
+    fn from(e: std::ffi::NulError) -> SciDBError {
+        SciDBError::NulError(e)
+    }
+}
+
+impl From<std::io::Error> for SciDBError {
+    fn from(e: std::io::Error) -> Self {
+        SciDBError::IoError(e)
+    }
+}
+
+impl From<ArrowError> for SciDBError {
+    fn from(e: ArrowError) -> Self {
+        SciDBError::ArrowError(e)
+    }
+}
+
+impl std::fmt::Display for SciDBError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "SciDBError is here!")
+    }
+}
+
+impl std::error::Error for SciDBError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match &self {
+            SciDBError::NulError(e) => Some(e),
+            SciDBError::IoError(e) => Some(e),
+            SciDBError::ArrowError(e) => Some(e),
+            _ => None,
+        }
+    }
 }
 
 impl SciDBConnection {
-    pub fn new(hostname: &str, username: &str, password: &str, scidbport: i32) -> SciDBConnection {
+    pub fn new(
+        hostname: &str,
+        username: &str,
+        password: &str,
+        scidbport: i32,
+    ) -> Result<SciDBConnection, SciDBError> {
         let mut status: i32 = 0;
         let sp = &mut status as *mut i32;
-        let chostname = CString::new(hostname).unwrap();
-        let cusername = CString::new(username).unwrap();
-        let cpassword = CString::new(password).unwrap();
+        let chostname = CString::new(hostname)?;
+        let cusername = CString::new(username)?;
+        let cpassword = CString::new(password)?;
         let c_conn = unsafe {
             c_scidb_connect(
                 chostname.as_ptr(),
@@ -61,20 +106,21 @@ impl SciDBConnection {
             )
         };
         if status == 0 && c_conn != 0 as *mut c_void {
-            return SciDBConnection::Open(SciDBConnectionPtr { c_ptr: c_conn });
+            return Ok(SciDBConnection {
+                start: Instant::now(),
+                c_ptr: c_conn,
+            });
         } else {
-            return SciDBConnection::Closed(status);
+            return Err(SciDBError::ConnectionError(status));
         }
     }
 }
 
 impl Drop for SciDBConnection {
     fn drop(&mut self) {
-        match self {
-            SciDBConnection::Open(ptr) => unsafe {
-                c_scidb_disconnect(ptr.c_ptr.clone());
-            },
-            SciDBConnection::Closed(_) => (),
+        assert!(self.c_ptr != std::ptr::null_mut());
+        unsafe {
+            c_scidb_disconnect(self.c_ptr.clone());
         }
     }
 }
@@ -111,38 +157,23 @@ impl Drop for QueryResult {
 // Query exection methods on SciDBConnection //
 ///////////////////////////////////////////////
 
-#[derive(Debug)]
-pub struct QueryError {
-    pub code: i32,
-    pub explanation: String,
-}
-
 impl SciDBConnection {
     // Preparation step
-    pub fn prepare_query(&mut self, query: &str, result: &QueryResult) -> Option<QueryError> {
-        match self {
-            SciDBConnection::Open(c_conn) => {
-                let cquery = CString::new(query).unwrap();
-                let mut errbuf = vec![0; MAX_VARLEN];
-                let errbufptr = errbuf.as_mut_ptr() as *mut i8;
-                let code = unsafe {
-                    c_prepare_query(c_conn.c_ptr.clone(), cquery.as_ptr(), result.ptr, errbufptr)
-                };
-                let error = unsafe { CStr::from_ptr(errbufptr) };
-                let error: String = String::from_utf8_lossy(error.to_bytes()).to_string();
-                if code == 0 && error.is_empty() {
-                    None
-                } else {
-                    Some(QueryError {
-                        code: code,
-                        explanation: error,
-                    })
-                }
-            }
-            SciDBConnection::Closed(_) => Some(QueryError {
-                code: SHIM_NO_SCIDB_CONNECTION,
-                explanation: "SciDB connection not open".to_owned(),
-            }),
+    pub fn prepare_query(&mut self, query: &str, result: &QueryResult) -> Option<SciDBError> {
+        let cquery = CString::new(query).ok()?;
+        let mut errbuf = vec![0; MAX_VARLEN];
+        let errbufptr = errbuf.as_mut_ptr() as *mut i8;
+        let code =
+            unsafe { c_prepare_query(self.c_ptr.clone(), cquery.as_ptr(), result.ptr, errbufptr) };
+        let error = unsafe { CStr::from_ptr(errbufptr) };
+        let error: String = String::from_utf8_lossy(error.to_bytes()).to_string();
+        if code == 0 && error.is_empty() {
+            None
+        } else {
+            Some(SciDBError::QueryError {
+                code: code,
+                explanation: error,
+            })
         }
     }
 
@@ -151,65 +182,44 @@ impl SciDBConnection {
         &mut self,
         query: &str,
         result: &QueryResult,
-    ) -> Option<QueryError> {
-        match self {
-            SciDBConnection::Open(c_conn) => {
-                let cquery = CString::new(query).unwrap();
-                let mut errbuf = vec![0; MAX_VARLEN];
-                let errbufptr = errbuf.as_mut_ptr() as *mut i8;
-                let code = unsafe {
-                    c_execute_prepared_query(
-                        c_conn.c_ptr.clone(),
-                        cquery.as_ptr(),
-                        result.ptr,
-                        errbufptr,
-                    )
-                };
-                let error = unsafe { CStr::from_ptr(errbufptr) };
-                let error: String = String::from_utf8_lossy(error.to_bytes()).to_string();
-                if code == 0 && error.is_empty() {
-                    None
-                } else {
-                    Some(QueryError {
-                        code: code,
-                        explanation: error,
-                    })
-                }
-            }
-            SciDBConnection::Closed(_) => Some(QueryError {
-                code: SHIM_NO_SCIDB_CONNECTION,
-                explanation: "SciDB connection not open".to_owned(),
-            }),
+    ) -> Option<SciDBError> {
+        let cquery = CString::new(query).ok()?;
+        let mut errbuf = vec![0; MAX_VARLEN];
+        let errbufptr = errbuf.as_mut_ptr() as *mut i8;
+        let code = unsafe {
+            c_execute_prepared_query(self.c_ptr.clone(), cquery.as_ptr(), result.ptr, errbufptr)
+        };
+        let error = unsafe { CStr::from_ptr(errbufptr) };
+        let error: String = String::from_utf8_lossy(error.to_bytes()).to_string();
+        if code == 0 && error.is_empty() {
+            None
+        } else {
+            Some(SciDBError::QueryError {
+                code: code,
+                explanation: error,
+            })
         }
     }
 
     // Completion
-    pub fn complete_query(&mut self, result: &QueryResult) -> Option<QueryError> {
-        match self {
-            SciDBConnection::Open(c_conn) => {
-                let mut errbuf = vec![0; MAX_VARLEN];
-                let errbufptr = errbuf.as_mut_ptr() as *mut i8;
-                let code = unsafe { c_complete_query(c_conn.c_ptr.clone(), result.ptr, errbufptr) };
-                let error = unsafe { CStr::from_ptr(errbufptr) };
-                let error: String = String::from_utf8_lossy(error.to_bytes()).to_string();
-                if code == 0 && error.is_empty() {
-                    None
-                } else {
-                    Some(QueryError {
-                        code: code,
-                        explanation: error,
-                    })
-                }
-            }
-            SciDBConnection::Closed(_) => Some(QueryError {
-                code: SHIM_NO_SCIDB_CONNECTION,
-                explanation: "SciDB connection not open".to_owned(),
-            }),
+    pub fn complete_query(&mut self, result: &QueryResult) -> Option<SciDBError> {
+        let mut errbuf = vec![0; MAX_VARLEN];
+        let errbufptr = errbuf.as_mut_ptr() as *mut i8;
+        let code = unsafe { c_complete_query(self.c_ptr.clone(), result.ptr, errbufptr) };
+        let error = unsafe { CStr::from_ptr(errbufptr) };
+        let error: String = String::from_utf8_lossy(error.to_bytes()).to_string();
+        if code == 0 && error.is_empty() {
+            None
+        } else {
+            Some(SciDBError::QueryError {
+                code: code,
+                explanation: error,
+            })
         }
     }
 
     // All-in-one method
-    pub fn execute_query(&mut self, query: &str) -> Result<QueryID, QueryError> {
+    pub fn execute_query(&mut self, query: &str) -> Result<QueryID, SciDBError> {
         let mut qr = QueryResult::new();
 
         // Prep
@@ -242,31 +252,13 @@ impl SciDBConnection {
  * to a temporary file in arrow format;
  */
 
-impl From<std::io::Error> for QueryError {
-    fn from(e: std::io::Error) -> Self {
-        Self {
-            code: SHIM_IO_ERROR,
-            explanation: e.to_string(),
-        }
-    }
-}
-
-impl From<ArrowError> for QueryError {
-    fn from(e: ArrowError) -> Self {
-        Self {
-            code: SHIM_ARROW_ERROR,
-            explanation: e.to_string(),
-        }
-    }
-}
-
 pub struct AioQuery {
     pub qid: QueryID,
     buffer_path: tempfile::TempPath,
 }
 
 impl AioQuery {
-    pub fn new() -> Result<AioQuery, QueryError> {
+    pub fn new() -> Result<AioQuery, SciDBError> {
         let buffer = tempfile::NamedTempFile::new()?;
         let path = buffer.into_temp_path(); // consumes and closes buffer();
         return Ok(AioQuery {
@@ -288,14 +280,14 @@ impl AioQuery {
         Some(aio_query)
     }
 
-    pub fn to_batches(self) -> Result<Vec<RecordBatch>, QueryError> {
+    pub fn to_batches(self) -> Result<Vec<RecordBatch>, SciDBError> {
         self.into()
     }
 }
 
-impl Into<Result<Vec<RecordBatch>, QueryError>> for AioQuery {
-    fn into(self) -> Result<Vec<RecordBatch>, QueryError> {
-        let pathstr = self.buffer_path.to_str().ok_or(QueryError {
+impl Into<Result<Vec<RecordBatch>, SciDBError>> for AioQuery {
+    fn into(self) -> Result<Vec<RecordBatch>, SciDBError> {
+        let pathstr = self.buffer_path.to_str().ok_or(SciDBError::QueryError {
             code: SHIM_IO_ERROR,
             explanation: "cannot convert path to string".to_owned(),
         })?;
@@ -313,12 +305,12 @@ impl Into<Result<Vec<RecordBatch>, QueryError>> for AioQuery {
 }
 
 impl SciDBConnection {
-    pub fn execute_aio_query(&mut self, query: &str) -> Result<AioQuery, QueryError> {
+    pub fn execute_aio_query(&mut self, query: &str) -> Result<AioQuery, SciDBError> {
         // Create AioQuery buffer and get path
         let mut aio = AioQuery::new()?;
 
         // Wrap AFL to save it to the buffer file in arrow format
-        let aio_query = aio.query_str(query).ok_or(QueryError {
+        let aio_query = aio.query_str(query).ok_or(SciDBError::QueryError {
             code: SHIM_IO_ERROR,
             explanation: "cannot convert path to string".to_owned(),
         })?;

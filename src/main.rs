@@ -61,6 +61,11 @@ fn dferr_to_flighterr(dferr: DataFusionError) -> FlightError {
     }
 }
 
+fn dferr_to_status(dferr: DataFusionError) -> Status {
+    let e = dferr_to_flighterr(dferr);
+    Status::new(tonic::Code::Unknown, e.to_string())
+}
+
 // Convert this DFSchema to Bytes, which is
 // surprisingly verbose and requires picking some IpcWriteOptions
 fn schema_to_bytes(dfschema: &datafusion_common::DFSchema) -> bytes::Bytes {
@@ -103,18 +108,21 @@ impl FlightService for FlightServiceImpl {
         &self,
         _request: Request<Streaming<HandshakeRequest>>,
     ) -> Result<Response<Self::HandshakeStream>, Status> {
-
         // Get username and password as separate messages
         let mut rq = _request.into_inner();
         let username = if let Some(hsr) = rq.message().await? {
             hsr.payload.escape_ascii().to_string()
         } else {
-            return Err(Status::invalid_argument("Username not provided during handshake"));
+            return Err(Status::invalid_argument(
+                "Username not provided during handshake",
+            ));
         };
         let password = if let Some(hsr) = rq.message().await? {
             hsr.payload.escape_ascii().to_string()
         } else {
-            return Err(Status::invalid_argument("Password not provided during handshake"));
+            return Err(Status::invalid_argument(
+                "Password not provided during handshake",
+            ));
         };
 
         // Authenticate via SciDB
@@ -128,11 +136,11 @@ impl FlightService for FlightServiceImpl {
         };
         let conn = SciDBConnection::new(&hostname, &username, &password, scidbport);
         let response = match conn {
-            SciDBConnection::Open(_) => Ok(arrow_flight::HandshakeResponse{
+            Ok(_) => Ok(arrow_flight::HandshakeResponse {
                 protocol_version: 0,
-                payload: bytes::Bytes::from_static(b"hello world")
+                payload: bytes::Bytes::from_static(b"hello world"),
             }),
-            SciDBConnection::Closed(_) => Err(Status::unauthenticated("SciDB authentication failed"))
+            Err(_) => Err(Status::unauthenticated("SciDB authentication failed")),
         };
 
         // Send response
@@ -153,11 +161,15 @@ impl FlightService for FlightServiceImpl {
         let headers = _request.metadata();
         dbg!(headers);
         if !headers.contains_key("authorization") {
-            return Err(Status::unauthenticated("No authorization bearer token provided"));
+            return Err(Status::unauthenticated(
+                "No authorization bearer token provided",
+            ));
         }
         let provided_token = headers.get("authorization").unwrap();
         if provided_token != "hello world" {
-            return Err(Status::unauthenticated("Invalid authorization bearer token provided"));
+            return Err(Status::unauthenticated(
+                "Invalid authorization bearer token provided",
+            ));
         }
 
         // Note: abusing a FlightDescriptor of type PATH
@@ -168,7 +180,7 @@ impl FlightService for FlightServiceImpl {
         let fd = _request.into_inner();
         let query = fd.path[0].clone();
         // Do enough DataFusion logic to get the schema of sql output
-        let df = self.ctx.sql(&query).await.unwrap();
+        let df = self.ctx.sql(&query).await.map_err(dferr_to_status)?;
         let schema = schema_to_bytes(df.schema());
         // Return a flight info with the ticket exactly equal to the
         // query string; this is inconsistent with the Flight standard
@@ -198,11 +210,15 @@ impl FlightService for FlightServiceImpl {
         let headers = _request.metadata();
         dbg!(headers);
         if !headers.contains_key("authorization") {
-            return Err(Status::unauthenticated("No authorization bearer token provided"));
+            return Err(Status::unauthenticated(
+                "No authorization bearer token provided",
+            ));
         }
         let provided_token = headers.get("authorization").unwrap();
         if provided_token != "hello world" {
-            return Err(Status::unauthenticated("Invalid authorization bearer token provided"));
+            return Err(Status::unauthenticated(
+                "Invalid authorization bearer token provided",
+            ));
         }
 
         // Note: abusing a FlightDescriptor of type PATH
@@ -213,7 +229,7 @@ impl FlightService for FlightServiceImpl {
         let fd = _request.into_inner();
         let query = fd.path[0].clone();
         // Do enough DataFusion logic to get the schema of sql output
-        let df = self.ctx.sql(&query).await.unwrap();
+        let df = self.ctx.sql(&query).await.map_err(dferr_to_status)?;
         let schema = schema_to_bytes(df.schema());
 
         let sr = SchemaResult { schema: schema };
@@ -229,20 +245,22 @@ impl FlightService for FlightServiceImpl {
         let headers = _request.metadata();
         dbg!(headers);
         if !headers.contains_key("authorization") {
-            return Err(Status::unauthenticated("No authorization bearer token provided"));
+            return Err(Status::unauthenticated(
+                "No authorization bearer token provided",
+            ));
         }
         let provided_token = headers.get("authorization").unwrap();
         if provided_token != "hello world" {
-            return Err(Status::unauthenticated("Invalid authorization bearer token provided"));
+            return Err(Status::unauthenticated(
+                "Invalid authorization bearer token provided",
+            ));
         }
 
         // Process
         let ticket = _request.into_inner();
         let query = ticket.ticket.escape_ascii().to_string();
-        // TODO: implement From<DataFusionError> for Status or some converter
-        // to replace unwrap with ?
-        let results = self.ctx.sql(&query).await.unwrap();
-        let dfstream = results.execute_stream().await.unwrap();
+        let results = self.ctx.sql(&query).await.map_err(dferr_to_status)?;
+        let dfstream = results.execute_stream().await.map_err(dferr_to_status)?;
 
         // Build a stream of `Result<FlightData>` (e.g. to return for do_get)
         let flight_data_stream = FlightDataEncoderBuilder::new()
@@ -286,8 +304,8 @@ impl FlightService for FlightServiceImpl {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Parse CLI arguments and read YAML config
     let args = Args::parse();
-    let conff = std::fs::File::open(&args.config).unwrap();
-    let config: ShimConfig = serde_yaml::from_reader(conff).unwrap();
+    let conff = std::fs::File::open(&args.config)?;
+    let config: ShimConfig = serde_yaml::from_reader(conff)?;
 
     // SciDB connection config...
     let hostname = match env::var("SCIDB_HOST") {
@@ -304,14 +322,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let scidbport = match env::var("SCIDB_PORT") {
         Err(_) => 1239,
-        Ok(port) => port.parse::<i32>().unwrap(),
+        Ok(port) => port.parse::<i32>()?,
     };
 
     // Connect to SciDB...
-    let mut conn = SciDBConnection::new(&hostname, &username, &password, scidbport);
-    if let SciDBConnection::Closed(status) = conn {
-        panic!("Connection to SciDB failed! status code {status}");
-    }
+    let mut conn = SciDBConnection::new(&hostname, &username, &password, scidbport)?;
 
     // Create a DataFusion context
     let ctx = SessionContext::new();
@@ -320,32 +335,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let db_start = Instant::now();
     for arr in config.arrays {
         let q_start = Instant::now();
-        let res = conn.execute_aio_query(&arr.afl);
-        match res {
-            Err(error) => println!(
-                "Error code {} in executing query:\n\n{}",
-                error.code, error.explanation
-            ),
-            Ok(aio) => {
-                println!(
-                    "Executed SciDB query {}.{}",
-                    aio.qid.coordinatorid, aio.qid.queryid
-                );
-                let q_duration = q_start.elapsed();
-                println!("Elapsed SciDB query duration: {:?}", q_duration);
-                // at this point data is still on-disk in buffer file
-                let data = aio.to_batches().unwrap(); // consumes buffer file, data lives in memory
-                                                      // todo: should check that array length is > 0
-                let record_batch =
-                    datafusion::arrow::compute::concat_batches(&data[0].schema(), &data).unwrap();
-                let reg = ctx.register_batch(&arr.name, record_batch);
-                if let Err(error) = reg {
-                    println!(
-                        "Error while loading SciDB query results into DataFusion:\n\n{}",
-                        error
-                    )
-                }
-            }
+        let aio = conn.execute_aio_query(&arr.afl)?;
+        println!(
+            "Executed SciDB query {}.{}",
+            aio.qid.coordinatorid, aio.qid.queryid
+        );
+        let q_duration = q_start.elapsed();
+        println!("Elapsed SciDB query duration: {:?}", q_duration);
+        // at this point data is still on-disk in buffer file
+        let data = aio.to_batches()?; // consumes buffer file, data lives in memory
+                                      // todo: should check that array length is > 0
+        let record_batch = datafusion::arrow::compute::concat_batches(&data[0].schema(), &data)?;
+        let reg = ctx.register_batch(&arr.name, record_batch);
+        if let Err(error) = reg {
+            println!(
+                "Error while loading SciDB query results into DataFusion:\n\n{}",
+                error
+            )
         }
     }
     let db_duration = db_start.elapsed();
