@@ -39,30 +39,34 @@ use tonic::{Request, Response, Status, Streaming};
 use arrow_flight::{
     flight_service_server::FlightService, flight_service_server::FlightServiceServer, Action,
     ActionType, Criteria, Empty, FlightData, FlightDescriptor, FlightEndpoint, FlightInfo,
-    HandshakeRequest, HandshakeResponse, PutResult, SchemaResult, Ticket
+    HandshakeRequest, HandshakeResponse, PutResult, SchemaResult, Ticket,
 };
 //use arrow_flight::encode::FlightDataEncoder;
 use arrow_flight::encode::FlightDataEncoderBuilder;
-//use arrow_flight::error::FlightError;
+use arrow_flight::error::FlightError;
+use datafusion::error::DataFusionError;
 
 #[derive(Clone)]
 pub struct FlightServiceImpl {
     ctx: SessionContext,
 }
 
+fn dferr_to_flighterr(dferr: DataFusionError) -> FlightError {
+    match dferr {
+        DataFusionError::ArrowError(e) => FlightError::Arrow(e),
+        e => FlightError::ExternalError(Box::new(e)),
+    }
+}
 
 // Convert this DFSchema to Bytes, which is
 // surprisingly verbose and requires picking some IpcWriteOptions
 fn schema_to_bytes(dfschema: &datafusion_common::DFSchema) -> bytes::Bytes {
-    use datafusion::arrow::datatypes::Schema;
+    use arrow_flight::{IpcMessage, SchemaAsIpc};
     use arrow_ipc::writer::IpcWriteOptions;
-    use arrow_flight::{SchemaAsIpc, IpcMessage};
+    use datafusion::arrow::datatypes::Schema;
     let schema: Schema = dfschema.into();
-    let iwo = IpcWriteOptions::try_new(
-        64,
-        false,
-        arrow_ipc::gen::Schema::MetadataVersion::V5
-    ).unwrap();
+    let iwo =
+        IpcWriteOptions::try_new(64, false, arrow_ipc::gen::Schema::MetadataVersion::V5).unwrap();
     let schemaipc = SchemaAsIpc::new(&schema, &iwo);
     let ipc = IpcMessage::try_from(schemaipc).unwrap();
     ipc.0
@@ -118,7 +122,7 @@ impl FlightService for FlightServiceImpl {
             flight_descriptor: Some(fd),
             endpoint: vec![FlightEndpoint {
                 ticket: Some(Ticket {
-                    ticket: query.into() // the ticket
+                    ticket: query.into(), // the ticket
                 }),
                 location: vec![],
             }],
@@ -144,9 +148,7 @@ impl FlightService for FlightServiceImpl {
         let df = self.ctx.sql(&query).await.unwrap();
         let schema = schema_to_bytes(df.schema());
 
-        let sr = SchemaResult {
-            schema: schema,
-        };
+        let sr = SchemaResult { schema: schema };
 
         let response = tonic::Response::new(sr);
         Ok(response)
@@ -157,21 +159,25 @@ impl FlightService for FlightServiceImpl {
     ) -> Result<Response<Self::DoGetStream>, Status> {
         let ticket = _request.into_inner();
         let query = ticket.ticket.escape_ascii().to_string();
+        // TODO: implement From<DataFusionError> for Status or some converter
+        // to replace unwrap with ?
         let results = self.ctx.sql(&query).await.unwrap();
-        let batches = results.collect().await.unwrap();
+        let dfstream = results.execute_stream().await.unwrap();
+        // Turn stream elements from Result<RecordBatch, DataFusionError> to Result<RecordBatch, FlightErr>
+        //let flight_stream = futures::stream::iter(dfstream.into_iter().map_err(|dfe| Ok));
 
         // Get an input stream of Result<RecordBatch, FlightError>
         // NOTE: would be much better to call results.execute_stream()
         // and turn this stream of RecordBatch objects into a stream
         // of Result<RecordBatch, FlightError> objects
-        let record_batch =
-            datafusion::arrow::compute::concat_batches(&batches[0].schema(), &batches).unwrap();
-        let input_stream = futures::stream::iter(vec![Ok(record_batch)]);
+        //let record_batch =
+        //    datafusion::arrow::compute::concat_batches(&batches[0].schema(), &batches).unwrap();
+        //let input_stream = futures::stream::iter(vec![Ok(record_batch)]);
 
         // Build a stream of `Result<FlightData>` (e.g. to return for do_get)
         let flight_data_stream = FlightDataEncoderBuilder::new()
-            .build(input_stream)
-            .map_err(|_e| Status::ok("ok"))
+            .build(dfstream.map_err(dferr_to_flighterr))
+            .map_err(|e| Status::new(tonic::Code::Unknown, e.to_string()))
             .boxed();
 
         // Create a tonic `Response` that can be returned from a Flight server
