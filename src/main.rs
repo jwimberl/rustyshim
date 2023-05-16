@@ -134,14 +134,15 @@ impl FlightService for FlightServiceImpl {
             Err(_) => 1239,
             Ok(port) => port.parse::<i32>().unwrap(),
         };
-        let conn = SciDBConnection::new(&hostname, &username, &password, scidbport);
-        let response = match conn {
-            Ok(_) => Ok(arrow_flight::HandshakeResponse {
-                protocol_version: 0,
-                payload: bytes::Bytes::from_static(b"hello world"),
-            }),
-            Err(_) => Err(Status::unauthenticated("SciDB authentication failed")),
-        };
+        let _conn = SciDBConnection::new(&hostname, &username, &password, scidbport)?;
+        // TODO: a SCiDB authentication error should actually be handled
+        // and probably returned to the user in a HandshakeResponse that
+        // notifies of the failed authentication
+
+        let response = Ok(arrow_flight::HandshakeResponse {
+            protocol_version: 0,
+            payload: bytes::Bytes::from_static(b"hello world"),
+        });
 
         // Send response
         let total_response = futures::stream::iter(vec![response]);

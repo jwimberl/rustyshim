@@ -6,7 +6,7 @@ use datafusion::arrow::record_batch::RecordBatch;
 use std::ffi::CStr;
 use std::ffi::CString;
 use std::os::raw::c_void;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 const MAX_VARLEN: usize = 4096;
 
@@ -68,7 +68,19 @@ impl From<ArrowError> for SciDBError {
 
 impl std::fmt::Display for SciDBError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "SciDBError is here!")
+        match &self {
+            SciDBError::ConnectionError(code) => {
+                write!(f, "error code {} encountered during SciDB connection", code)
+            }
+            SciDBError::QueryError { code, explanation } => write!(
+                f,
+                "error code {} encountered during SciDB query; message: {}",
+                code, explanation
+            ),
+            SciDBError::NulError(e) => write!(f, "{}", e.to_string()),
+            SciDBError::IoError(e) => write!(f, "{}", e.to_string()),
+            SciDBError::ArrowError(e) => write!(f, "{}", e.to_string()),
+        }
     }
 }
 
@@ -82,6 +94,19 @@ impl std::error::Error for SciDBError {
         }
     }
 }
+
+impl From<SciDBError> for tonic::Status {
+    fn from(e: SciDBError) -> tonic::Status {
+        match e {
+            SciDBError::ConnectionError(_) => {
+                tonic::Status::unauthenticated("SciDB authentication failed")
+            }
+            _ => tonic::Status::unknown(e.to_string()),
+        }
+    }
+}
+
+// Connection object
 
 impl SciDBConnection {
     pub fn new(
