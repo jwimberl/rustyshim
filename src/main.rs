@@ -1,12 +1,46 @@
+use arrow_flight::encode::FlightDataEncoderBuilder;
+use arrow_flight::error::FlightError;
+use arrow_flight::{
+    flight_service_server::FlightService, flight_service_server::FlightServiceServer, Action,
+    ActionType, Criteria, Empty, FlightData, FlightDescriptor, FlightEndpoint, FlightInfo,
+    HandshakeRequest, HandshakeResponse, PutResult, SchemaResult, Ticket,
+};
+use clap::Parser;
+use datafusion::error::DataFusionError;
 use datafusion::prelude::*;
+use futures::Stream;
+use futures::StreamExt;
+use futures::TryStreamExt;
 use rustyshim::SciDBConnection;
 use serde::{Deserialize, Serialize};
 use serde_yaml;
 use std::env;
+use std::pin::Pin;
 use std::time::Instant;
 use tokio; // 0.3.5
+use tonic::transport::Server;
+use tonic::{Request, Response, Status, Streaming};
 
+//////////////////////////
 // Configuration format //
+//////////////////////////
+
+// Configuration file format
+
+#[derive(Serialize, Deserialize, Debug)]
+struct ShimConfig {
+    arrays: Vec<SciDBArray>,
+}
+
+// Command line arguments
+
+#[derive(Parser)]
+struct Args {
+    /// The path to the YAML config file to read
+    config: std::path::PathBuf,
+}
+
+// SQL request config
 
 #[derive(Serialize, Deserialize, Debug)]
 struct SciDBArray {
@@ -14,42 +48,11 @@ struct SciDBArray {
     afl: String,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
-struct ShimConfig {
-    arrays: Vec<SciDBArray>,
-}
+///////////////////////////////////////////
+// DataFusion <-> Flight interop methods //
+///////////////////////////////////////////
 
-use clap::Parser;
-
-/// Search for a pattern in a file and display the lines that contain it.
-#[derive(Parser)]
-struct Args {
-    /// The path to the YAML config file to read
-    config: std::path::PathBuf,
-}
-
-/// Flight server
-use futures::Stream;
-use futures::StreamExt;
-use futures::TryStreamExt;
-use std::pin::Pin;
-use tonic::transport::Server;
-use tonic::{Request, Response, Status, Streaming};
-//use tonic::IntoStreamingRequest;
-use arrow_flight::{
-    flight_service_server::FlightService, flight_service_server::FlightServiceServer, Action,
-    ActionType, Criteria, Empty, FlightData, FlightDescriptor, FlightEndpoint, FlightInfo,
-    HandshakeRequest, HandshakeResponse, PutResult, SchemaResult, Ticket,
-};
-//use arrow_flight::encode::FlightDataEncoder;
-use arrow_flight::encode::FlightDataEncoderBuilder;
-use arrow_flight::error::FlightError;
-use datafusion::error::DataFusionError;
-
-#[derive(Clone)]
-pub struct FlightServiceImpl {
-    ctx: SessionContext,
-}
+// Map error types
 
 fn dferr_to_flighterr(dferr: DataFusionError) -> FlightError {
     match dferr {
@@ -72,6 +75,15 @@ fn schema_to_bytes(dfschema: &datafusion_common::DFSchema) -> bytes::Bytes {
     ipc.0
 }
 
+//////////////////////////////////
+// FlightService implementation //
+//////////////////////////////////
+
+#[derive(Clone)]
+pub struct FlightServiceImpl {
+    ctx: SessionContext,
+}
+
 #[tonic::async_trait]
 impl FlightService for FlightServiceImpl {
     type HandshakeStream =
@@ -91,7 +103,41 @@ impl FlightService for FlightServiceImpl {
         &self,
         _request: Request<Streaming<HandshakeRequest>>,
     ) -> Result<Response<Self::HandshakeStream>, Status> {
-        Err(Status::unimplemented("Not yet implemented"))
+
+        // Get username and password as separate messages
+        let mut rq = _request.into_inner();
+        let username = if let Some(hsr) = rq.message().await? {
+            hsr.payload.escape_ascii().to_string()
+        } else {
+            return Err(Status::invalid_argument("Username not provided during handshake"));
+        };
+        let password = if let Some(hsr) = rq.message().await? {
+            hsr.payload.escape_ascii().to_string()
+        } else {
+            return Err(Status::invalid_argument("Password not provided during handshake"));
+        };
+
+        // Authenticate via SciDB
+        let hostname = match env::var("SCIDB_HOST") {
+            Err(_) => String::from("localhost"),
+            Ok(host) => host,
+        };
+        let scidbport = match env::var("SCIDB_PORT") {
+            Err(_) => 1239,
+            Ok(port) => port.parse::<i32>().unwrap(),
+        };
+        let conn = SciDBConnection::new(&hostname, &username, &password, scidbport);
+        let response = match conn {
+            SciDBConnection::Open(_) => Ok(arrow_flight::HandshakeResponse{
+                protocol_version: 0,
+                payload: bytes::Bytes::from_static(b"hello world")
+            }),
+            SciDBConnection::Closed(_) => Err(Status::unauthenticated("SciDB authentication failed"))
+        };
+
+        // Send response
+        let total_response = futures::stream::iter(vec![response]);
+        Ok(tonic::Response::new(Box::pin(total_response)))
     }
     async fn list_flights(
         &self,
@@ -103,6 +149,17 @@ impl FlightService for FlightServiceImpl {
         &self,
         _request: Request<FlightDescriptor>,
     ) -> Result<Response<FlightInfo>, Status> {
+        // Authorize
+        let headers = _request.metadata();
+        dbg!(headers);
+        if !headers.contains_key("authorization") {
+            return Err(Status::unauthenticated("No authorization bearer token provided"));
+        }
+        let provided_token = headers.get("authorization").unwrap();
+        if provided_token != "hello world" {
+            return Err(Status::unauthenticated("Invalid authorization bearer token provided"));
+        }
+
         // Note: abusing a FlightDescriptor of type PATH
         // and effectively treating it as a flight descriptor
         // of type CMD; to adhere strictly to the experimental
@@ -137,6 +194,17 @@ impl FlightService for FlightServiceImpl {
         &self,
         _request: Request<FlightDescriptor>,
     ) -> Result<Response<SchemaResult>, Status> {
+        // Authorize
+        let headers = _request.metadata();
+        dbg!(headers);
+        if !headers.contains_key("authorization") {
+            return Err(Status::unauthenticated("No authorization bearer token provided"));
+        }
+        let provided_token = headers.get("authorization").unwrap();
+        if provided_token != "hello world" {
+            return Err(Status::unauthenticated("Invalid authorization bearer token provided"));
+        }
+
         // Note: abusing a FlightDescriptor of type PATH
         // and effectively treating it as a flight descriptor
         // of type CMD; to adhere strictly to the experimental
@@ -157,22 +225,24 @@ impl FlightService for FlightServiceImpl {
         &self,
         _request: Request<Ticket>,
     ) -> Result<Response<Self::DoGetStream>, Status> {
+        // Authorize
+        let headers = _request.metadata();
+        dbg!(headers);
+        if !headers.contains_key("authorization") {
+            return Err(Status::unauthenticated("No authorization bearer token provided"));
+        }
+        let provided_token = headers.get("authorization").unwrap();
+        if provided_token != "hello world" {
+            return Err(Status::unauthenticated("Invalid authorization bearer token provided"));
+        }
+
+        // Process
         let ticket = _request.into_inner();
         let query = ticket.ticket.escape_ascii().to_string();
         // TODO: implement From<DataFusionError> for Status or some converter
         // to replace unwrap with ?
         let results = self.ctx.sql(&query).await.unwrap();
         let dfstream = results.execute_stream().await.unwrap();
-        // Turn stream elements from Result<RecordBatch, DataFusionError> to Result<RecordBatch, FlightErr>
-        //let flight_stream = futures::stream::iter(dfstream.into_iter().map_err(|dfe| Ok));
-
-        // Get an input stream of Result<RecordBatch, FlightError>
-        // NOTE: would be much better to call results.execute_stream()
-        // and turn this stream of RecordBatch objects into a stream
-        // of Result<RecordBatch, FlightError> objects
-        //let record_batch =
-        //    datafusion::arrow::compute::concat_batches(&batches[0].schema(), &batches).unwrap();
-        //let input_stream = futures::stream::iter(vec![Ok(record_batch)]);
 
         // Build a stream of `Result<FlightData>` (e.g. to return for do_get)
         let flight_data_stream = FlightDataEncoderBuilder::new()
