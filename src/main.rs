@@ -11,12 +11,15 @@ use datafusion::prelude::*;
 use futures::Stream;
 use futures::StreamExt;
 use futures::TryStreamExt;
+use rand::{distributions::Alphanumeric, Rng};
 use rustyshim::SciDBConnection;
 use serde::{Deserialize, Serialize};
 use serde_yaml;
+use std::collections::HashMap;
 use std::env;
 use std::pin::Pin;
-use std::time::Instant;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use tokio; // 0.3.5
 use tonic::transport::Server;
 use tonic::{Request, Response, Status, Streaming};
@@ -66,6 +69,10 @@ fn dferr_to_status(dferr: DataFusionError) -> Status {
     Status::new(tonic::Code::Unknown, e.to_string())
 }
 
+fn mderr_to_status(_e: tonic::metadata::errors::ToStrError) -> Status {
+    Status::new(tonic::Code::Unknown, "error reading request header")
+}
+
 // Convert this DFSchema to Bytes, which is
 // surprisingly verbose and requires picking some IpcWriteOptions
 fn schema_to_bytes(dfschema: &datafusion_common::DFSchema) -> bytes::Bytes {
@@ -85,8 +92,57 @@ fn schema_to_bytes(dfschema: &datafusion_common::DFSchema) -> bytes::Bytes {
 //////////////////////////////////
 
 #[derive(Clone)]
+pub struct ClientSessionInfo {
+    username: String,
+    start: Instant,
+}
+
+type SessionMap = Arc<Mutex<HashMap<String, ClientSessionInfo>>>;
+
+#[derive(Clone)]
 pub struct FlightServiceImpl {
     ctx: SessionContext,
+    token_map: SessionMap,
+}
+
+impl FlightServiceImpl {
+    pub fn create_token(&self, username: &String) -> String {
+        let token: String = rand::thread_rng()
+            .sample_iter(&Alphanumeric)
+            .take(32)
+            .map(char::from)
+            .collect();
+        let mut db = self.token_map.lock().unwrap();
+        db.entry(token.clone())
+            .and_modify(|session| {
+                (*session).username = username.clone();
+                (*session).start = Instant::now();
+            })
+            .or_insert(ClientSessionInfo {
+                username: username.clone(),
+                start: Instant::now(),
+            });
+        token
+    }
+
+    pub fn validate_headers(&self, headers: &tonic::metadata::MetadataMap) -> Result<(), Status> {
+        dbg!(headers);
+        let provided_token = headers
+            .get("authorization")
+            .ok_or(Status::unauthenticated("no session token provided"))?
+            .to_str()
+            .map_err(mderr_to_status)?;
+
+        let db = self.token_map.lock().unwrap();
+        let info = db
+            .get(provided_token)
+            .ok_or(Status::unauthenticated("invalid session token"))?;
+        let token_age = info.start.elapsed();
+        if token_age > Duration::from_secs(86400) {
+            return Err(Status::unauthenticated("expired session token"));
+        }
+        Ok(())
+    }
 }
 
 #[tonic::async_trait]
@@ -134,14 +190,14 @@ impl FlightService for FlightServiceImpl {
             Err(_) => 1239,
             Ok(port) => port.parse::<i32>().unwrap(),
         };
-        let _conn = SciDBConnection::new(&hostname, &username, &password, scidbport)?;
-        // TODO: a SCiDB authentication error should actually be handled
-        // and probably returned to the user in a HandshakeResponse that
-        // notifies of the failed authentication
+        SciDBConnection::new(&hostname, &username, &password, scidbport)?;
+
+        // With a successful connection, generate token and add it to token_map
+        let token = self.create_token(&username);
 
         let response = Ok(arrow_flight::HandshakeResponse {
             protocol_version: 0,
-            payload: bytes::Bytes::from_static(b"hello world"),
+            payload: bytes::Bytes::from(token)
         });
 
         // Send response
@@ -159,19 +215,7 @@ impl FlightService for FlightServiceImpl {
         _request: Request<FlightDescriptor>,
     ) -> Result<Response<FlightInfo>, Status> {
         // Authorize
-        let headers = _request.metadata();
-        dbg!(headers);
-        if !headers.contains_key("authorization") {
-            return Err(Status::unauthenticated(
-                "No authorization bearer token provided",
-            ));
-        }
-        let provided_token = headers.get("authorization").unwrap();
-        if provided_token != "hello world" {
-            return Err(Status::unauthenticated(
-                "Invalid authorization bearer token provided",
-            ));
-        }
+        self.validate_headers(_request.metadata())?;
 
         // Note: abusing a FlightDescriptor of type PATH
         // and effectively treating it as a flight descriptor
@@ -208,19 +252,7 @@ impl FlightService for FlightServiceImpl {
         _request: Request<FlightDescriptor>,
     ) -> Result<Response<SchemaResult>, Status> {
         // Authorize
-        let headers = _request.metadata();
-        dbg!(headers);
-        if !headers.contains_key("authorization") {
-            return Err(Status::unauthenticated(
-                "No authorization bearer token provided",
-            ));
-        }
-        let provided_token = headers.get("authorization").unwrap();
-        if provided_token != "hello world" {
-            return Err(Status::unauthenticated(
-                "Invalid authorization bearer token provided",
-            ));
-        }
+        self.validate_headers(_request.metadata())?;
 
         // Note: abusing a FlightDescriptor of type PATH
         // and effectively treating it as a flight descriptor
@@ -243,19 +275,7 @@ impl FlightService for FlightServiceImpl {
         _request: Request<Ticket>,
     ) -> Result<Response<Self::DoGetStream>, Status> {
         // Authorize
-        let headers = _request.metadata();
-        dbg!(headers);
-        if !headers.contains_key("authorization") {
-            return Err(Status::unauthenticated(
-                "No authorization bearer token provided",
-            ));
-        }
-        let provided_token = headers.get("authorization").unwrap();
-        if provided_token != "hello world" {
-            return Err(Status::unauthenticated(
-                "Invalid authorization bearer token provided",
-            ));
-        }
+        self.validate_headers(_request.metadata())?;
 
         // Process
         let ticket = _request.into_inner();
@@ -361,7 +381,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Launch Flight server //
 
     let addr = "127.0.0.1:50051".parse()?;
-    let service = FlightServiceImpl { ctx: ctx };
+    let service = FlightServiceImpl {
+        ctx: ctx,
+        token_map: Arc::new(Mutex::new(HashMap::<String, ClientSessionInfo>::new())),
+    };
     let svc = FlightServiceServer::new(service);
     Server::builder().add_service(svc).serve(addr).await?;
     Ok(())

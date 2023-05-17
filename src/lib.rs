@@ -6,7 +6,6 @@ use datafusion::arrow::record_batch::RecordBatch;
 use std::ffi::CStr;
 use std::ffi::CString;
 use std::os::raw::c_void;
-use std::time::Instant;
 
 const MAX_VARLEN: usize = 4096;
 
@@ -35,7 +34,6 @@ const MAX_VARLEN: usize = 4096;
 /////////////////////
 
 pub struct SciDBConnection {
-    start: Instant,
     c_ptr: *mut c_void,
 }
 
@@ -131,10 +129,7 @@ impl SciDBConnection {
             )
         };
         if status == 0 && c_conn != 0 as *mut c_void {
-            return Ok(SciDBConnection {
-                start: Instant::now(),
-                c_ptr: c_conn,
-            });
+            return Ok(SciDBConnection { c_ptr: c_conn });
         } else {
             return Err(SciDBError::ConnectionError(status));
         }

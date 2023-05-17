@@ -22,3 +22,4 @@ datafusion = "22"
 arrow-flight = { version = "36.0.0" }
 arrow-ipc = { version = "36.0.0" }
 futures = { version = "0.3", default-features = false, features = ["alloc"] }
+rand = { version = "0.8.5" }

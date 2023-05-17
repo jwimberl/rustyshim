@@ -2255,6 +2255,7 @@ dependencies = [
  "datafusion",
  "datafusion-common",
  "futures",
+ "rand",
  "serde",
  "serde_yaml",
  "tempfile",
