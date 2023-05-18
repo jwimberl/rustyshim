@@ -59,4 +59,7 @@ fn main() {
     // Our libclient.a will be linked automatically
     println!("cargo:rustc-link-search=native={}", scidb_lpath);
     println!("cargo:rustc-link-lib=scidbclient");
+
+    // LD_LIBRARY_PATH setting for cargo run executoin
+    println!("cargo:rustc-env=LD_LIBRARY_PATH={}", scidb_lpath);
 }

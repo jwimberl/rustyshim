@@ -16,7 +16,7 @@ use rustyshim::SciDBConnection;
 use serde::{Deserialize, Serialize};
 use serde_yaml;
 use std::collections::HashMap;
-use std::env;
+use std::io::Write;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -38,8 +38,30 @@ struct ShimConfig {
 // Command line arguments
 
 #[derive(Parser)]
+#[command(author, version, about, long_about = None)]
 struct Args {
+    /// The SciDB hostname
+    #[arg(long, default_value = "localhost")]
+    hostname: String,
+
+    /// The SciDB port
+    #[arg(long, default_value_t = 1239)]
+    port: i32,
+
+    /// The SciDB admin username
+    #[arg(short, long)]
+    username: Option<String>,
+
+    /// The SciDB admin password
+    #[arg(short, long)]
+    password: Option<String>,
+
+    /// Flag to read the SciDB admin password from TTY
+    #[arg(long, action)]
+    password_stdin: bool,
+
     /// The path to the YAML config file to read
+    #[arg(short, long)]
     config: std::path::PathBuf,
 }
 
@@ -103,6 +125,8 @@ type SessionMap = Arc<Mutex<HashMap<String, ClientSessionInfo>>>;
 pub struct FlightServiceImpl {
     ctx: SessionContext,
     token_map: SessionMap,
+    scidb_hostname: String,
+    scidb_port: i32,
 }
 
 impl FlightServiceImpl {
@@ -182,22 +206,14 @@ impl FlightService for FlightServiceImpl {
         };
 
         // Authenticate via SciDB
-        let hostname = match env::var("SCIDB_HOST") {
-            Err(_) => String::from("localhost"),
-            Ok(host) => host,
-        };
-        let scidbport = match env::var("SCIDB_PORT") {
-            Err(_) => 1239,
-            Ok(port) => port.parse::<i32>().unwrap(),
-        };
-        SciDBConnection::new(&hostname, &username, &password, scidbport)?;
+        SciDBConnection::new(&self.scidb_hostname, &username, &password, self.scidb_port)?;
 
         // With a successful connection, generate token and add it to token_map
         let token = self.create_token(&username);
 
         let response = Ok(arrow_flight::HandshakeResponse {
             protocol_version: 0,
-            payload: bytes::Bytes::from(token)
+            payload: bytes::Bytes::from(token),
         });
 
         // Send response
@@ -325,29 +341,46 @@ impl FlightService for FlightServiceImpl {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Parse CLI arguments and read YAML config
     let args = Args::parse();
+    // Logic:
+    // -- must not have both --password or --password_stdin argument
+    // -- if have either, must not have username
+    if args.password.is_some() && args.password_stdin {
+        panic!("You may not choose both the --password and --password_stdin argument");
+    }
+    if !args.username.is_some() && (args.password.is_some() || args.password_stdin) {
+        panic!("You may not supply a password via the arugments without a username");
+    }
+    // Parse/prompt for needed credentials
+    let username = match args.username {
+        Some(provided) => provided,
+        None => {
+            let mut prompted = String::new();
+            print!("SciDB username: ");
+            let _ = std::io::stdout().flush();
+            std::io::stdin()
+                .read_line(&mut prompted)
+                .expect("Invalid username");
+            prompted.trim().to_string()
+        }
+    };
+    let password = if args.password_stdin {
+        let mut prompted = String::new();
+        std::io::stdin()
+            .read_line(&mut prompted)
+            .expect("Invalid password via stdin");
+        prompted.trim().to_string()
+    } else {
+        match args.password {
+            Some(provided) => provided,
+            None => rpassword::prompt_password("SciDB password: ")?,
+        }
+    };
+
     let conff = std::fs::File::open(&args.config)?;
     let config: ShimConfig = serde_yaml::from_reader(conff)?;
 
-    // SciDB connection config...
-    let hostname = match env::var("SCIDB_HOST") {
-        Err(_) => String::from("localhost"),
-        Ok(host) => host,
-    };
-    let username = match env::var("SCIDB_USER") {
-        Err(_) => String::from("scidbadmin"),
-        Ok(user) => user,
-    };
-    let password = match env::var("SCIDB_PASSWORD") {
-        Err(_) => String::from(""),
-        Ok(passwd) => passwd,
-    };
-    let scidbport = match env::var("SCIDB_PORT") {
-        Err(_) => 1239,
-        Ok(port) => port.parse::<i32>()?,
-    };
-
     // Connect to SciDB...
-    let mut conn = SciDBConnection::new(&hostname, &username, &password, scidbport)?;
+    let mut conn = SciDBConnection::new(&args.hostname, &username, &password, args.port)?;
 
     // Create a DataFusion context
     let ctx = SessionContext::new();
@@ -384,6 +417,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let service = FlightServiceImpl {
         ctx: ctx,
         token_map: Arc::new(Mutex::new(HashMap::<String, ClientSessionInfo>::new())),
+        scidb_hostname: args.hostname,
+        scidb_port: args.port,
     };
     let svc = FlightServiceServer::new(service);
     Server::builder().add_service(svc).serve(addr).await?;
