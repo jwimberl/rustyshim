@@ -1,7 +1,7 @@
 use arrow_flight::flight_service_server::FlightServiceServer;
 use clap::Parser;
 use datafusion::prelude::*;
-use rustyshim::flight::FusionFlightService;
+use rustyshim::flight::{FusionFlightAuthenticator, FusionFlightService};
 use rustyshim::scidb::SciDBConnection;
 use serde::{Deserialize, Serialize};
 use serde_yaml;
@@ -54,6 +54,24 @@ struct Args {
     /// The path to the YAML config file to read
     #[arg(short, long)]
     config: std::path::PathBuf,
+}
+
+// Authenticator class //
+#[derive(Clone)]
+struct SciDBAuthenticator {
+    hostname: String,
+    port: i32,
+}
+
+#[tonic::async_trait]
+impl FusionFlightAuthenticator for SciDBAuthenticator {
+    fn authenticate(&self, username: &String, password: &String) -> bool {
+        let conn = SciDBConnection::new(&self.hostname, username, password, self.port);
+        match conn {
+            Ok(_) => true,
+            Err(_) => false,
+        }
+    }
 }
 
 // Main function //
@@ -132,10 +150,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let db_duration = db_start.elapsed();
     println!("Elapsed database construction duration: {:?}", db_duration);
 
+    // Create SciDBAuthenticator //
+    let auth = SciDBAuthenticator {
+        hostname: args.hostname,
+        port: args.port,
+    };
+
     // Launch Flight server //
 
     let addr = "127.0.0.1:50051".parse()?;
-    let service = FusionFlightService::new(ctx, args.hostname, args.port).await;
+    let service = FusionFlightService::new(ctx, Box::new(auth)).await;
     let svc = FlightServiceServer::new(service);
     Server::builder().add_service(svc).serve(addr).await?;
     Ok(())

@@ -1,4 +1,3 @@
-use crate::scidb::SciDBConnection;
 use arrow_flight::encode::FlightDataEncoderBuilder;
 use arrow_flight::error::FlightError;
 use arrow_flight::{
@@ -74,18 +73,23 @@ pub struct TicketInfo {
 type SessionMap = Arc<Mutex<HashMap<String, ClientSessionInfo>>>;
 type TicketMap = Arc<Mutex<HashMap<String, TicketInfo>>>;
 
-#[derive(Clone)]
+pub trait FusionFlightAuthenticator {
+    fn authenticate(&self, username: &String, password: &String) -> bool;
+}
+
 pub struct FusionFlightService {
     ctx: SessionContext,
     token_map: SessionMap,
     ticket_map: TicketMap,
-    hostname: String,
-    port: i32,
     flight_info: Arc<Mutex<Vec<Result<FlightInfo, Status>>>>,
+    authenticator: Box<dyn FusionFlightAuthenticator + Send + Sync + 'static>,
 }
 
 impl FusionFlightService {
-    pub async fn new(ctx: SessionContext, hostname: String, port: i32) -> Self {
+    pub async fn new(
+        ctx: SessionContext,
+        authenticator: Box<dyn FusionFlightAuthenticator + Send + Sync + 'static>,
+    ) -> Self {
         // Create default flights (for each table))
         let schema_provider = ctx
             .catalog("datafusion")
@@ -119,9 +123,8 @@ impl FusionFlightService {
             ctx: ctx,
             token_map: Arc::new(Mutex::new(HashMap::<String, ClientSessionInfo>::new())),
             ticket_map: Arc::new(Mutex::new(HashMap::<String, TicketInfo>::new())),
-            hostname: hostname,
-            port: port,
             flight_info: Arc::new(Mutex::new(collected_flight_info)),
+            authenticator: authenticator,
         }
     }
 
@@ -221,8 +224,10 @@ impl FlightService for FusionFlightService {
             ));
         };
 
-        // Authenticate via SciDB
-        SciDBConnection::new(&self.hostname, &username, &password, self.port)?;
+        // Authenticate
+        if !self.authenticator.authenticate(&username, &password) {
+            return Err(Status::unauthenticated("authentication failed"));
+        }
 
         // With a successful connection, generate token and add it to token_map
         let token = self.create_token(&username);
