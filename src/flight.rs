@@ -141,15 +141,13 @@ impl FusionFlightService {
             .map(char::from)
             .collect();
         let mut tdb = self.ticket_map.lock().unwrap();
-        tdb.entry(ticket.clone())
-            .and_modify(|ticket| {
-                (*ticket).creation = Instant::now();
-                (*ticket).dataframe = dataframe.clone(); // note: rust compiler seems to think both these could happen
-            })
-            .or_insert(TicketInfo {
+        tdb.insert(
+            ticket.clone(),
+            TicketInfo {
                 creation: Instant::now(),
                 dataframe: dataframe,
-            });
+            },
+        );
         ticket
     }
 
@@ -292,7 +290,11 @@ impl FlightService for FusionFlightService {
         let df = self
             .get_ticket(ticket)
             .ok_or(Status::not_found("ticket not found"))?;
-        let dfstream = df.dataframe.execute_stream().await.map_err(dferr_to_status)?;
+        let dfstream = df
+            .dataframe
+            .execute_stream()
+            .await
+            .map_err(dferr_to_status)?;
 
         // Build a stream of `Result<FlightData>` (e.g. to return for do_get)
         let flight_data_stream = FlightDataEncoderBuilder::new()
