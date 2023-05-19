@@ -22,8 +22,10 @@ class RustyShimConnection:
         self.options = pf.FlightCallOptions(headers=[(b'authorization',h.get_token())])
     
     def get_sql(self, query):
-        ticket = pf.Ticket(query)
-        return(self.client.do_get(ticket, self.options))
+        fd = pf.FlightDescriptor.for_path(query)
+        fi = self.client.get_flight_info(fd, self.options)
+        ep = fi.endpoints[0]
+        return(self.client.do_get(ep.ticket, self.options))
 
 def rustyshim_connect(location, username, password):
     return(RustyShimConnection(location, username, password))
