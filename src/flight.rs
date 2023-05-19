@@ -64,12 +64,23 @@ pub struct ClientSessionInfo {
     start: Instant,
 }
 
+// TODO:
+// - implement timeout based on creation time
+// - store token to add per-session protection
+#[derive(Clone)]
+pub struct TicketInfo {
+    creation: Instant,
+    dataframe: DataFrame,
+}
+
 type SessionMap = Arc<Mutex<HashMap<String, ClientSessionInfo>>>;
+type TicketMap = Arc<Mutex<HashMap<String, TicketInfo>>>;
 
 #[derive(Clone)]
 pub struct FusionFlightService {
     ctx: SessionContext,
     token_map: SessionMap,
+    ticket_map: TicketMap,
     hostname: String,
     port: i32,
 }
@@ -79,6 +90,7 @@ impl FusionFlightService {
         FusionFlightService {
             ctx: ctx,
             token_map: Arc::new(Mutex::new(HashMap::<String, ClientSessionInfo>::new())),
+            ticket_map: Arc::new(Mutex::new(HashMap::<String, TicketInfo>::new())),
             hostname: hostname,
             port: port,
         }
@@ -120,6 +132,30 @@ impl FusionFlightService {
             return Err(Status::unauthenticated("expired session token"));
         }
         Ok(())
+    }
+
+    pub fn create_ticket(&self, dataframe: DataFrame) -> String {
+        let ticket: String = rand::thread_rng()
+            .sample_iter(&Alphanumeric)
+            .take(32)
+            .map(char::from)
+            .collect();
+        let mut tdb = self.ticket_map.lock().unwrap();
+        tdb.entry(ticket.clone())
+            .and_modify(|ticket| {
+                (*ticket).creation = Instant::now();
+                (*ticket).dataframe = dataframe.clone(); // note: rust compiler seems to think both these could happen
+            })
+            .or_insert(TicketInfo {
+                creation: Instant::now(),
+                dataframe: dataframe,
+            });
+        ticket
+    }
+
+    pub fn get_ticket(&self, ticket: String) -> Option<TicketInfo> {
+        let mut tdb = self.ticket_map.lock().unwrap();
+        tdb.remove(&ticket)
     }
 }
 
@@ -193,10 +229,14 @@ impl FlightService for FusionFlightService {
         // FlightSQL protocol the sql query should be encoded
         // in a specific command format
         let fd = _request.into_inner();
-        let query = fd.path[0].clone();
+        let query = fd.path[0].clone().replace("\\\'", "'");
         // Do enough DataFusion logic to get the schema of sql output
         let df = self.ctx.sql(&query).await.map_err(dferr_to_status)?;
         let schema = schema_to_bytes(df.schema());
+
+        // Store this in the TicketMap
+        let ticket = self.create_ticket(df);
+
         // Return a flight info with the ticket exactly equal to the
         // query string; this is inconsistent with the Flight standard
         // and should be replaced by an opaque ticket that can be used
@@ -206,7 +246,7 @@ impl FlightService for FusionFlightService {
             flight_descriptor: Some(fd),
             endpoint: vec![FlightEndpoint {
                 ticket: Some(Ticket {
-                    ticket: query.into(), // the ticket
+                    ticket: ticket.into(),
                 }),
                 location: vec![],
             }],
@@ -248,14 +288,11 @@ impl FlightService for FusionFlightService {
         self.validate_headers(_request.metadata())?;
 
         // Process
-        let ticket = _request.into_inner();
-        let query = ticket
-            .ticket
-            .escape_ascii()
-            .to_string()
-            .replace("\\\'", "'");
-        let results = self.ctx.sql(&query).await.map_err(dferr_to_status)?;
-        let dfstream = results.execute_stream().await.map_err(dferr_to_status)?;
+        let ticket = _request.into_inner().ticket.escape_ascii().to_string();
+        let df = self
+            .get_ticket(ticket)
+            .ok_or(Status::not_found("ticket not found"))?;
+        let dfstream = df.dataframe.execute_stream().await.map_err(dferr_to_status)?;
 
         // Build a stream of `Result<FlightData>` (e.g. to return for do_get)
         let flight_data_stream = FlightDataEncoderBuilder::new()
