@@ -295,7 +295,11 @@ impl FlightService for FlightServiceImpl {
 
         // Process
         let ticket = _request.into_inner();
-        let query = ticket.ticket.escape_ascii().to_string();
+        let query = ticket
+            .ticket
+            .escape_ascii()
+            .to_string()
+            .replace("\\\'", "'");
         let results = self.ctx.sql(&query).await.map_err(dferr_to_status)?;
         let dfstream = results.execute_stream().await.map_err(dferr_to_status)?;
 
