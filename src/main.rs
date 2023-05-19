@@ -135,7 +135,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Launch Flight server //
 
     let addr = "127.0.0.1:50051".parse()?;
-    let service = FusionFlightService::new(ctx, args.hostname, args.port);
+    let service = FusionFlightService::new(ctx, args.hostname, args.port).await;
     let svc = FlightServiceServer::new(service);
     Server::builder().add_service(svc).serve(addr).await?;
     Ok(())

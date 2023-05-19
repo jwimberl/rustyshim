@@ -6,6 +6,7 @@ use arrow_flight::{
     FlightDescriptor, FlightEndpoint, FlightInfo, HandshakeRequest, HandshakeResponse, PutResult,
     SchemaResult, Ticket,
 };
+use datafusion::arrow::datatypes::Schema;
 use datafusion::error::DataFusionError;
 use datafusion::prelude::*;
 use futures::Stream;
@@ -42,11 +43,9 @@ fn mderr_to_status(_e: tonic::metadata::errors::ToStrError) -> Status {
 
 // Convert this DFSchema to Bytes, which is
 // surprisingly verbose and requires picking some IpcWriteOptions
-fn schema_to_bytes(dfschema: &datafusion_common::DFSchema) -> bytes::Bytes {
+fn schema_to_bytes(schema: &Schema) -> bytes::Bytes {
     use arrow_flight::{IpcMessage, SchemaAsIpc};
     use arrow_ipc::writer::IpcWriteOptions;
-    use datafusion::arrow::datatypes::Schema;
-    let schema: Schema = dfschema.into();
     let iwo =
         IpcWriteOptions::try_new(64, false, arrow_ipc::gen::Schema::MetadataVersion::V5).unwrap();
     let schemaipc = SchemaAsIpc::new(&schema, &iwo);
@@ -69,7 +68,6 @@ pub struct ClientSessionInfo {
 // - store token to add per-session protection
 #[derive(Clone)]
 pub struct TicketInfo {
-    creation: Instant,
     dataframe: DataFrame,
 }
 
@@ -83,16 +81,47 @@ pub struct FusionFlightService {
     ticket_map: TicketMap,
     hostname: String,
     port: i32,
+    flight_info: Arc<Mutex<Vec<Result<FlightInfo, Status>>>>,
 }
 
 impl FusionFlightService {
-    pub fn new(ctx: SessionContext, hostname: String, port: i32) -> Self {
+    pub async fn new(ctx: SessionContext, hostname: String, port: i32) -> Self {
+        // Create default flights (for each table))
+        let schema_provider = ctx
+            .catalog("datafusion")
+            .expect("catalog 'datafusion' must exist")
+            .schema("public")
+            .expect("schema 'public' must exist");
+
+        let tables = schema_provider.table_names();
+
+        // Turn into stream of FlightInfo
+        let flight_info = tables.iter().map(|table| async {
+            let tcopy = table.clone();
+            let table_data = schema_provider
+                .table(&tcopy[..])
+                .await
+                .ok_or(Status::unknown("table schema not found"))?;
+            let schema = table_data.schema();
+            Ok::<FlightInfo, Status>(FlightInfo {
+                schema: schema_to_bytes(&schema),
+                flight_descriptor: Some(FlightDescriptor::new_path(vec![tcopy])),
+                endpoint: vec![],
+                total_records: -1,
+                total_bytes: -1,
+            })
+        });
+
+        let collected_flight_info = futures::future::join_all(flight_info).await;
+
+        // Create and return service object
         FusionFlightService {
             ctx: ctx,
             token_map: Arc::new(Mutex::new(HashMap::<String, ClientSessionInfo>::new())),
             ticket_map: Arc::new(Mutex::new(HashMap::<String, TicketInfo>::new())),
             hostname: hostname,
             port: port,
+            flight_info: Arc::new(Mutex::new(collected_flight_info)),
         }
     }
 
@@ -144,7 +173,6 @@ impl FusionFlightService {
         tdb.insert(
             ticket.clone(),
             TicketInfo {
-                creation: Instant::now(),
                 dataframe: dataframe,
             },
         );
@@ -212,7 +240,13 @@ impl FlightService for FusionFlightService {
         &self,
         _request: Request<Criteria>,
     ) -> Result<Response<Self::ListFlightsStream>, Status> {
-        Err(Status::unimplemented("Not yet implemented"))
+        // Authorize
+        self.validate_headers(_request.metadata())?;
+
+        // Send response
+        let flight_info = self.flight_info.lock().unwrap().clone();
+        let tablestream = futures::stream::iter(flight_info);
+        Ok(tonic::Response::new(Box::pin(tablestream)))
     }
     async fn get_flight_info(
         &self,
@@ -230,7 +264,7 @@ impl FlightService for FusionFlightService {
         let query = fd.path[0].clone().replace("\\\'", "'");
         // Do enough DataFusion logic to get the schema of sql output
         let df = self.ctx.sql(&query).await.map_err(dferr_to_status)?;
-        let schema = schema_to_bytes(df.schema());
+        let schema: Schema = df.schema().into();
 
         // Store this in the TicketMap
         let ticket = self.create_ticket(df);
@@ -240,7 +274,7 @@ impl FlightService for FusionFlightService {
         // and should be replaced by an opaque ticket that can be used
         // to retrieve the DataFrame df created above and execute it
         let fi = FlightInfo {
-            schema: schema,
+            schema: schema_to_bytes(&schema),
             flight_descriptor: Some(fd),
             endpoint: vec![FlightEndpoint {
                 ticket: Some(Ticket {
@@ -269,11 +303,13 @@ impl FlightService for FusionFlightService {
         // in a specific command format
         let fd = _request.into_inner();
         let query = fd.path[0].clone();
+
         // Do enough DataFusion logic to get the schema of sql output
         let df = self.ctx.sql(&query).await.map_err(dferr_to_status)?;
-        let schema = schema_to_bytes(df.schema());
-
-        let sr = SchemaResult { schema: schema };
+        let schema: Schema = df.schema().into();
+        let sr = SchemaResult {
+            schema: schema_to_bytes(&schema),
+        };
 
         let response = tonic::Response::new(sr);
         Ok(response)
@@ -310,7 +346,9 @@ impl FlightService for FusionFlightService {
         &self,
         _request: Request<Streaming<FlightData>>,
     ) -> Result<Response<Self::DoPutStream>, Status> {
-        Err(Status::unimplemented("Not yet implemented"))
+        Err(Status::unauthenticated(
+            "PUT not authorized for this database",
+        ))
     }
     async fn do_action(
         &self,
