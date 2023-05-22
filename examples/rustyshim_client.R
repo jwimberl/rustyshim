@@ -1,6 +1,6 @@
 rustyshim_connect <- function(host = "localhost", username, password, port, scheme = "grpc+tcp") 
 {
-    prs <- reticulate::import("pyarrow_auth_handler")
+    prs <- reticulate::import("rustyshim_client")
     location <- paste0(scheme, "://", host, ":", port)
     prs$rustyshim_connect(location,username, password)
 }
