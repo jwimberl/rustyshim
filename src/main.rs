@@ -1,7 +1,7 @@
 use arrow_flight::flight_service_server::FlightServiceServer;
 use clap::Parser;
 use datafusion::prelude::*;
-use rustyshim::flight::{FusionFlightAuthenticator, FusionFlightService};
+use rustyshim::flight::{FusionFlightAuthenticator, FusionFlightService, SessionType};
 use rustyshim::scidb::SciDBConnection;
 use serde::{Deserialize, Serialize};
 use serde_yaml;
@@ -65,11 +65,11 @@ struct SciDBAuthenticator {
 
 #[tonic::async_trait]
 impl FusionFlightAuthenticator for SciDBAuthenticator {
-    fn authenticate(&self, username: &String, password: &String) -> bool {
+    fn authenticate(&self, username: &String, password: &String) -> SessionType {
         let conn = SciDBConnection::new(&self.hostname, username, password, self.port);
         match conn {
-            Ok(_) => true,
-            Err(_) => false,
+            Ok(_) => SessionType::Admin, // TODO: check user permissions
+            Err(_) => SessionType::Unauthenticated,
         }
     }
 }

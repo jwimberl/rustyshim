@@ -56,10 +56,18 @@ fn schema_to_bytes(schema: &Schema) -> bytes::Bytes {
 // FlightService implementation //
 //////////////////////////////////
 
+#[derive(Clone,Copy,PartialEq)]
+pub enum SessionType {
+    Admin,
+    Regular,
+    Unauthenticated,
+}
+
 #[derive(Clone)]
 pub struct ClientSessionInfo {
     username: String,
     start: Instant,
+    session_type: SessionType,
 }
 
 // TODO:
@@ -74,7 +82,7 @@ type SessionMap = Arc<Mutex<HashMap<String, ClientSessionInfo>>>;
 type TicketMap = Arc<Mutex<HashMap<String, TicketInfo>>>;
 
 pub trait FusionFlightAuthenticator {
-    fn authenticate(&self, username: &String, password: &String) -> bool;
+    fn authenticate(&self, username: &String, password: &String) -> SessionType;
 }
 
 pub struct FusionFlightService {
@@ -128,7 +136,7 @@ impl FusionFlightService {
         }
     }
 
-    pub fn create_token(&self, username: &String) -> String {
+    pub fn create_token(&self, username: &String, session_type: SessionType) -> String {
         let token: String = rand::thread_rng()
             .sample_iter(&Alphanumeric)
             .take(32)
@@ -139,15 +147,20 @@ impl FusionFlightService {
             .and_modify(|session| {
                 (*session).username = username.clone();
                 (*session).start = Instant::now();
+                (*session).session_type = session_type
             })
             .or_insert(ClientSessionInfo {
                 username: username.clone(),
                 start: Instant::now(),
+                session_type: session_type,
             });
         token
     }
 
-    pub fn validate_headers(&self, headers: &tonic::metadata::MetadataMap) -> Result<(), Status> {
+    pub fn validate_headers(
+        &self,
+        headers: &tonic::metadata::MetadataMap,
+    ) -> Result<SessionType, Status> {
         dbg!(headers);
         let provided_token = headers
             .get("authorization")
@@ -163,7 +176,7 @@ impl FusionFlightService {
         if token_age > Duration::from_secs(86400) {
             return Err(Status::unauthenticated("expired session token"));
         }
-        Ok(())
+        Ok(info.session_type)
     }
 
     pub fn create_ticket(&self, dataframe: DataFrame) -> String {
@@ -225,12 +238,13 @@ impl FlightService for FusionFlightService {
         };
 
         // Authenticate
-        if !self.authenticator.authenticate(&username, &password) {
+        let st = self.authenticator.authenticate(&username, &password);
+        if st == SessionType::Unauthenticated {
             return Err(Status::unauthenticated("authentication failed"));
         }
 
         // With a successful connection, generate token and add it to token_map
-        let token = self.create_token(&username);
+        let token = self.create_token(&username, st);
 
         let response = Ok(arrow_flight::HandshakeResponse {
             protocol_version: 0,
@@ -359,8 +373,22 @@ impl FlightService for FusionFlightService {
         &self,
         _request: Request<Action>,
     ) -> Result<Response<Self::DoActionStream>, Status> {
-        Err(Status::unimplemented("Not yet implemented"))
+        // Authorize
+        let auth = self.validate_headers(_request.metadata())?;
+        if auth != SessionType::Admin {
+            return Err(Status::permission_denied(
+                "permission to perform admin action denied",
+            ));
+        }
+
+        // Perform action
+        let action = _request.into_inner();
+        let actiontype = action.r#type;
+        match actiontype {
+            _ => Err(Status::invalid_argument("invalid action")),
+        }
     }
+
     async fn list_actions(
         &self,
         _request: Request<Empty>,
