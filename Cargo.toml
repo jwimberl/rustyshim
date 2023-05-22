@@ -19,7 +19,7 @@ tonic = { version = "0.8.3", default-features = false, features = ["transport", 
 tempfile = "3.4.0"
 datafusion-common = "22"
 datafusion = "22"
-arrow-flight = { version = "36.0.0" }
+arrow-flight = { version = "36.0.0", features = ["flight-sql-experimental"]}
 arrow-ipc = { version = "36.0.0" }
 futures = { version = "0.3", default-features = false, features = ["alloc"] }
 rand = { version = "0.8.5" }

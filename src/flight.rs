@@ -1,11 +1,19 @@
 use arrow_flight::encode::FlightDataEncoderBuilder;
 use arrow_flight::error::FlightError;
 use arrow_flight::{
-    flight_service_server::FlightService, Action, ActionType, Criteria, Empty, FlightData,
-    FlightDescriptor, FlightEndpoint, FlightInfo, HandshakeRequest, HandshakeResponse, PutResult,
-    SchemaResult, Ticket,
+    flight_service_server::FlightService, sql::server::FlightSqlService,
+    sql::ActionClosePreparedStatementRequest, sql::ActionCreatePreparedStatementRequest,
+    sql::ActionCreatePreparedStatementResult, sql::CommandGetCatalogs,
+    sql::CommandGetCrossReference, sql::CommandGetDbSchemas, sql::CommandGetExportedKeys,
+    sql::CommandGetImportedKeys, sql::CommandGetPrimaryKeys, sql::CommandGetSqlInfo,
+    sql::CommandGetTableTypes, sql::CommandGetTables, sql::CommandPreparedStatementQuery,
+    sql::CommandPreparedStatementUpdate, sql::CommandStatementQuery, sql::CommandStatementUpdate,
+    sql::SqlInfo, sql::TicketStatementQuery, Action, FlightData, FlightDescriptor, FlightEndpoint,
+    FlightInfo, HandshakeRequest, HandshakeResponse, Ticket,
 };
-use datafusion::arrow::datatypes::Schema;
+use datafusion::arrow::array::{StringArray};
+use datafusion::arrow::datatypes::{DataType, Field, Schema};
+use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::error::DataFusionError;
 use datafusion::prelude::*;
 use futures::Stream;
@@ -189,24 +197,18 @@ impl FusionFlightService {
 }
 
 #[tonic::async_trait]
-impl FlightService for FusionFlightService {
-    type HandshakeStream =
-        Pin<Box<dyn Stream<Item = Result<HandshakeResponse, Status>> + Send + Sync + 'static>>;
-    type ListFlightsStream =
-        Pin<Box<dyn Stream<Item = Result<FlightInfo, Status>> + Send + Sync + 'static>>;
-    type DoGetStream = Pin<Box<dyn Stream<Item = Result<FlightData, Status>> + Send + 'static>>;
-    type DoPutStream =
-        Pin<Box<dyn Stream<Item = Result<PutResult, Status>> + Send + Sync + 'static>>;
-    type DoActionStream =
-        Pin<Box<dyn Stream<Item = Result<arrow_flight::Result, Status>> + Send + Sync + 'static>>;
-    type ListActionsStream =
-        Pin<Box<dyn Stream<Item = Result<ActionType, Status>> + Send + Sync + 'static>>;
-    type DoExchangeStream =
-        Pin<Box<dyn Stream<Item = Result<FlightData, Status>> + Send + Sync + 'static>>;
-    async fn handshake(
+impl FlightSqlService for FusionFlightService {
+    type FlightService = FusionFlightService;
+
+    /// Accept authentication and return a token
+    /// <https://arrow.apache.org/docs/format/Flight.html#authentication>
+    async fn do_handshake(
         &self,
         _request: Request<Streaming<HandshakeRequest>>,
-    ) -> Result<Response<Self::HandshakeStream>, Status> {
+    ) -> Result<
+        Response<Pin<Box<dyn Stream<Item = Result<HandshakeResponse, Status>> + Send>>>,
+        Status,
+    > {
         // Get username and password as separate messages
         let mut rq = _request.into_inner();
         let username = if let Some(hsr) = rq.message().await? {
@@ -241,31 +243,22 @@ impl FlightService for FusionFlightService {
         let total_response = futures::stream::iter(vec![response]);
         Ok(tonic::Response::new(Box::pin(total_response)))
     }
-    async fn list_flights(
-        &self,
-        _request: Request<Criteria>,
-    ) -> Result<Response<Self::ListFlightsStream>, Status> {
-        // Authorize
-        self.validate_headers(_request.metadata())?;
 
-        // Send response
-        let flight_info = self.flight_info.lock().unwrap().clone();
-        let tablestream = futures::stream::iter(flight_info);
-        Ok(tonic::Response::new(Box::pin(tablestream)))
-    }
-    async fn get_flight_info(
+    /// Get a FlightInfo for executing a SQL query.
+    async fn get_flight_info_statement(
         &self,
-        _request: Request<FlightDescriptor>,
+        query: CommandStatementQuery,
+        request: Request<FlightDescriptor>,
     ) -> Result<Response<FlightInfo>, Status> {
         // Authorize
-        self.validate_headers(_request.metadata())?;
+        self.validate_headers(request.metadata())?;
 
         // Note: abusing a FlightDescriptor of type PATH
         // and effectively treating it as a flight descriptor
         // of type CMD; to adhere strictly to the experimental
         // FlightSQL protocol the sql query should be encoded
         // in a specific command format
-        let fd = _request.into_inner();
+        let fd = request.into_inner();
         let query = fd.path[0].clone().replace("\\\'", "'");
         // Do enough DataFusion logic to get the schema of sql output
         let df = self.ctx.sql(&query).await.map_err(dferr_to_status)?;
@@ -294,40 +287,109 @@ impl FlightService for FusionFlightService {
         let response = tonic::Response::new(fi);
         Ok(response)
     }
-    async fn get_schema(
+
+    /// Get a FlightInfo for executing an already created prepared statement.
+    async fn get_flight_info_prepared_statement(
         &self,
-        _request: Request<FlightDescriptor>,
-    ) -> Result<Response<SchemaResult>, Status> {
-        // Authorize
-        self.validate_headers(_request.metadata())?;
-
-        // Note: abusing a FlightDescriptor of type PATH
-        // and effectively treating it as a flight descriptor
-        // of type CMD; to adhere strictly to the experimental
-        // FlightSQL protocol the sql query should be encoded
-        // in a specific command format
-        let fd = _request.into_inner();
-        let query = fd.path[0].clone();
-
-        // Do enough DataFusion logic to get the schema of sql output
-        let df = self.ctx.sql(&query).await.map_err(dferr_to_status)?;
-        let schema: Schema = df.schema().into();
-        let sr = SchemaResult {
-            schema: schema_to_bytes(&schema),
-        };
-
-        let response = tonic::Response::new(sr);
-        Ok(response)
+        query: CommandPreparedStatementQuery,
+        request: Request<FlightDescriptor>,
+    ) -> Result<Response<FlightInfo>, Status> {
+        Err(Status::unimplemented("Not yet implemented"))
     }
-    async fn do_get(
+
+    /// Get a FlightInfo for listing catalogs.
+    async fn get_flight_info_catalogs(
         &self,
-        _request: Request<Ticket>,
-    ) -> Result<Response<Self::DoGetStream>, Status> {
+        query: CommandGetCatalogs,
+        request: Request<FlightDescriptor>,
+    ) -> Result<Response<FlightInfo>, Status> {
+        Err(Status::unimplemented("Not yet implemented"))
+    }
+
+    /// Get a FlightInfo for listing schemas.
+    async fn get_flight_info_schemas(
+        &self,
+        query: CommandGetDbSchemas,
+        request: Request<FlightDescriptor>,
+    ) -> Result<Response<FlightInfo>, Status> {
+        Err(Status::unimplemented("Not yet implemented"))
+    }
+
+    /// Get a FlightInfo for listing tables.
+    async fn get_flight_info_tables(
+        &self,
+        query: CommandGetTables,
+        request: Request<FlightDescriptor>,
+    ) -> Result<Response<FlightInfo>, Status> {
+        Err(Status::unimplemented("Not yet implemented"))
+    }
+
+    /// Get a FlightInfo to extract information about the table types.
+    async fn get_flight_info_table_types(
+        &self,
+        query: CommandGetTableTypes,
+        request: Request<FlightDescriptor>,
+    ) -> Result<Response<FlightInfo>, Status> {
+        Err(Status::unimplemented("Not yet implemented"))
+    }
+
+    /// Get a FlightInfo for retrieving other information (See SqlInfo).
+    async fn get_flight_info_sql_info(
+        &self,
+        query: CommandGetSqlInfo,
+        request: Request<FlightDescriptor>,
+    ) -> Result<Response<FlightInfo>, Status> {
+        Err(Status::unimplemented("Not yet implemented"))
+    }
+
+    /// Get a FlightInfo to extract information about primary and foreign keys.
+    async fn get_flight_info_primary_keys(
+        &self,
+        query: CommandGetPrimaryKeys,
+        request: Request<FlightDescriptor>,
+    ) -> Result<Response<FlightInfo>, Status> {
+        Err(Status::unimplemented("Not yet implemented"))
+    }
+
+    /// Get a FlightInfo to extract information about exported keys.
+    async fn get_flight_info_exported_keys(
+        &self,
+        query: CommandGetExportedKeys,
+        request: Request<FlightDescriptor>,
+    ) -> Result<Response<FlightInfo>, Status> {
+        Err(Status::unimplemented("Not yet implemented"))
+    }
+
+    /// Get a FlightInfo to extract information about imported keys.
+    async fn get_flight_info_imported_keys(
+        &self,
+        query: CommandGetImportedKeys,
+        request: Request<FlightDescriptor>,
+    ) -> Result<Response<FlightInfo>, Status> {
+        Err(Status::unimplemented("Not yet implemented"))
+    }
+
+    /// Get a FlightInfo to extract information about cross reference.
+    async fn get_flight_info_cross_reference(
+        &self,
+        query: CommandGetCrossReference,
+        request: Request<FlightDescriptor>,
+    ) -> Result<Response<FlightInfo>, Status> {
+        Err(Status::unimplemented("Not yet implemented"))
+    }
+
+    // do_get
+
+    async fn do_get_statement(
+        &self,
+        ticket: TicketStatementQuery,
+        request: Request<Ticket>,
+    ) -> Result<Response<<Self as FlightService>::DoGetStream>, Status> {
         // Authorize
-        self.validate_headers(_request.metadata())?;
+        self.validate_headers(request.metadata())?;
 
         // Process
-        let ticket = _request.into_inner().ticket.escape_ascii().to_string();
+        let ticket = request.into_inner().ticket.escape_ascii().to_string();
         let df = self
             .get_ticket(ticket)
             .ok_or(Status::not_found("ticket not found"))?;
@@ -338,39 +400,184 @@ impl FlightService for FusionFlightService {
             .map_err(dferr_to_status)?;
 
         // Build a stream of `Result<FlightData>` (e.g. to return for do_get)
-        let flight_data_stream = FlightDataEncoderBuilder::new()
+        let catalogs_stream = FlightDataEncoderBuilder::new()
             .build(dfstream.map_err(dferr_to_flighterr))
             .map_err(|e| Status::new(tonic::Code::Unknown, e.to_string()))
             .boxed();
 
         // Create a tonic `Response` that can be returned from a Flight server
-        let response = tonic::Response::new(flight_data_stream);
+        let response = tonic::Response::new(catalogs_stream);
         Ok(response)
     }
-    async fn do_put(
+
+    /// Get a FlightDataStream containing the prepared statement query results.
+    async fn do_get_prepared_statement(
         &self,
-        _request: Request<Streaming<FlightData>>,
-    ) -> Result<Response<Self::DoPutStream>, Status> {
-        Err(Status::unauthenticated(
-            "PUT not authorized for this database",
-        ))
-    }
-    async fn do_action(
-        &self,
-        _request: Request<Action>,
-    ) -> Result<Response<Self::DoActionStream>, Status> {
+        query: CommandPreparedStatementQuery,
+        request: Request<Ticket>,
+    ) -> Result<Response<<Self as FlightService>::DoGetStream>, Status> {
         Err(Status::unimplemented("Not yet implemented"))
     }
-    async fn list_actions(
+
+    /// Get a FlightDataStream containing the list of catalogs.
+    async fn do_get_catalogs(
         &self,
-        _request: Request<Empty>,
-    ) -> Result<Response<Self::ListActionsStream>, Status> {
+        query: CommandGetCatalogs,
+        request: Request<Ticket>,
+    ) -> Result<Response<<Self as FlightService>::DoGetStream>, Status> {
+        // Authorize
+        self.validate_headers(request.metadata())?;
+
+        // Process
+        let catalogs_schema = Schema::new(vec![Field::new("CATALOG_NAME", DataType::Utf8, false)]);
+        let catalogs = StringArray::from(self.ctx.catalog_names());
+        let catalogs_batch =
+            RecordBatch::try_new(Arc::new(catalogs_schema), vec![Arc::new(catalogs)]);
+
+        // Build a stream of `Result<FlightData>` (e.g. to return for do_get)
+        let catalogs_stream = futures::stream::iter(vec![catalogs_batch]);
+        let catalogs_stream = FlightDataEncoderBuilder::new()
+            .build(catalogs_stream.map_err(|e| FlightError::Arrow(e)))
+            .map_err(|e| Status::new(tonic::Code::Unknown, e.to_string()))
+            .boxed();
+
+        // Create a tonic `Response` that can be returned from a Flight server
+        let response = tonic::Response::new(catalogs_stream);
+        Ok(response)
+    }
+
+    /// Get a FlightDataStream containing the list of schemas.
+    async fn do_get_schemas(
+        &self,
+        query: CommandGetDbSchemas,
+        request: Request<Ticket>,
+    ) -> Result<Response<<Self as FlightService>::DoGetStream>, Status> {
         Err(Status::unimplemented("Not yet implemented"))
     }
-    async fn do_exchange(
+
+    /// Get a FlightDataStream containing the list of tables.
+    async fn do_get_tables(
         &self,
-        _request: Request<Streaming<FlightData>>,
-    ) -> Result<Response<Self::DoExchangeStream>, Status> {
+        query: CommandGetTables,
+        request: Request<Ticket>,
+    ) -> Result<Response<<Self as FlightService>::DoGetStream>, Status> {
+        // Authorize
+        self.validate_headers(request.metadata())?;
+
+        // Send response
+        /*
+        let flight_info = self.flight_info.lock().unwrap().clone();
+        let tablestream = futures::stream::iter(flight_info);
+        Ok(tonic::Response::new(Box::pin(tablestream)))
+        */
         Err(Status::unimplemented("Not yet implemented"))
+    }
+
+    /// Get a FlightDataStream containing the data related to the table types.
+    async fn do_get_table_types(
+        &self,
+        query: CommandGetTableTypes,
+        request: Request<Ticket>,
+    ) -> Result<Response<<Self as FlightService>::DoGetStream>, Status> {
+        Err(Status::unimplemented("Not yet implemented"))
+    }
+
+    /// Get a FlightDataStream containing the list of SqlInfo results.
+    async fn do_get_sql_info(
+        &self,
+        query: CommandGetSqlInfo,
+        request: Request<Ticket>,
+    ) -> Result<Response<<Self as FlightService>::DoGetStream>, Status> {
+        Err(Status::unimplemented("Not yet implemented"))
+    }
+
+    /// Get a FlightDataStream containing the data related to the primary and foreign keys.
+    async fn do_get_primary_keys(
+        &self,
+        query: CommandGetPrimaryKeys,
+        request: Request<Ticket>,
+    ) -> Result<Response<<Self as FlightService>::DoGetStream>, Status> {
+        Err(Status::unimplemented("Not yet implemented"))
+    }
+
+    /// Get a FlightDataStream containing the data related to the exported keys.
+    async fn do_get_exported_keys(
+        &self,
+        query: CommandGetExportedKeys,
+        request: Request<Ticket>,
+    ) -> Result<Response<<Self as FlightService>::DoGetStream>, Status> {
+        Err(Status::unimplemented("Not yet implemented"))
+    }
+
+    /// Get a FlightDataStream containing the data related to the imported keys.
+    async fn do_get_imported_keys(
+        &self,
+        query: CommandGetImportedKeys,
+        request: Request<Ticket>,
+    ) -> Result<Response<<Self as FlightService>::DoGetStream>, Status> {
+        Err(Status::unimplemented("Not yet implemented"))
+    }
+
+    /// Get a FlightDataStream containing the data related to the cross reference.
+    async fn do_get_cross_reference(
+        &self,
+        query: CommandGetCrossReference,
+        request: Request<Ticket>,
+    ) -> Result<Response<<Self as FlightService>::DoGetStream>, Status> {
+        Err(Status::unimplemented("Not yet implemented"))
+    }
+
+    // do_put
+
+    /// Execute an update SQL statement.
+    async fn do_put_statement_update(
+        &self,
+        ticket: CommandStatementUpdate,
+        request: Request<Streaming<FlightData>>,
+    ) -> Result<i64, Status> {
+        Err(Status::unimplemented("Not yet implemented"))
+    }
+
+    /// Bind parameters to given prepared statement.
+    async fn do_put_prepared_statement_query(
+        &self,
+        query: CommandPreparedStatementQuery,
+        request: Request<Streaming<FlightData>>,
+    ) -> Result<Response<<Self as FlightService>::DoPutStream>, Status> {
+        Err(Status::unimplemented("Not yet implemented"))
+    }
+
+    /// Execute an update SQL prepared statement.
+    async fn do_put_prepared_statement_update(
+        &self,
+        query: CommandPreparedStatementUpdate,
+        request: Request<Streaming<FlightData>>,
+    ) -> Result<i64, Status> {
+        Err(Status::unimplemented("Not yet implemented"))
+    }
+
+    // do_action
+
+    /// Create a prepared statement from given SQL statement.
+    async fn do_action_create_prepared_statement(
+        &self,
+        query: ActionCreatePreparedStatementRequest,
+        request: Request<Action>,
+    ) -> Result<ActionCreatePreparedStatementResult, Status> {
+        Err(Status::unimplemented("Not yet implemented"))
+    }
+
+    /// Close a prepared statement.
+    async fn do_action_close_prepared_statement(
+        &self,
+        query: ActionClosePreparedStatementRequest,
+        request: Request<Action>,
+    ) {
+        // noop
+    }
+
+    /// Register a new SqlInfo result, making it available when calling GetSqlInfo.
+    async fn register_sql_info(&self, id: i32, result: &SqlInfo) {
+        // noop
     }
 }
