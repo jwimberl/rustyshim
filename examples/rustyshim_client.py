@@ -21,6 +21,10 @@ class RustyShimConnection:
         self.client.authenticate(h)
         self.options = pf.FlightCallOptions(headers=[(b'authorization',h.get_token())])
     
+    def refresh_context(self):
+        response = [r.body.to_pybytes().decode("utf-8") for r in self.client.do_action("REFRESH_CONTEXT", self.options)]
+        print(response)
+    
     def get_sql(self, query):
         fd = pf.FlightDescriptor.for_path(query)
         fi = self.client.get_flight_info(fd, self.options)

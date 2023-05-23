@@ -33,6 +33,7 @@ const MAX_VARLEN: usize = 4096;
 // SciDBConnection //
 /////////////////////
 
+#[derive(Clone)]
 pub struct SciDBConnection {
     c_ptr: *mut c_void,
 }
@@ -145,6 +146,9 @@ impl Drop for SciDBConnection {
     }
 }
 
+unsafe impl Send for SciDBConnection {}
+unsafe impl Sync for SciDBConnection {}
+
 /////////////////
 // QueryResult //
 /////////////////
@@ -179,7 +183,7 @@ impl Drop for QueryResult {
 
 impl SciDBConnection {
     // Preparation step
-    pub fn prepare_query(&mut self, query: &str, result: &QueryResult) -> Option<SciDBError> {
+    pub fn prepare_query(&self, query: &str, result: &QueryResult) -> Option<SciDBError> {
         let cquery = CString::new(query).ok()?;
         let mut errbuf = vec![0; MAX_VARLEN];
         let errbufptr = errbuf.as_mut_ptr() as *mut i8;
@@ -198,11 +202,7 @@ impl SciDBConnection {
     }
 
     // Post-preparation execution
-    pub fn execute_prepared_query(
-        &mut self,
-        query: &str,
-        result: &QueryResult,
-    ) -> Option<SciDBError> {
+    pub fn execute_prepared_query(&self, query: &str, result: &QueryResult) -> Option<SciDBError> {
         let cquery = CString::new(query).ok()?;
         let mut errbuf = vec![0; MAX_VARLEN];
         let errbufptr = errbuf.as_mut_ptr() as *mut i8;
@@ -222,7 +222,7 @@ impl SciDBConnection {
     }
 
     // Completion
-    pub fn complete_query(&mut self, result: &QueryResult) -> Option<SciDBError> {
+    pub fn complete_query(&self, result: &QueryResult) -> Option<SciDBError> {
         let mut errbuf = vec![0; MAX_VARLEN];
         let errbufptr = errbuf.as_mut_ptr() as *mut i8;
         let code = unsafe { c_complete_query(self.c_ptr.clone(), result.ptr, errbufptr) };
@@ -239,7 +239,7 @@ impl SciDBConnection {
     }
 
     // All-in-one method
-    pub fn execute_query(&mut self, query: &str) -> Result<QueryID, SciDBError> {
+    pub fn execute_query(&self, query: &str) -> Result<QueryID, SciDBError> {
         let mut qr = QueryResult::new();
 
         // Prep
@@ -325,7 +325,7 @@ impl Into<Result<Vec<RecordBatch>, SciDBError>> for AioQuery {
 }
 
 impl SciDBConnection {
-    pub fn execute_aio_query(&mut self, query: &str) -> Result<AioQuery, SciDBError> {
+    pub fn execute_aio_query(&self, query: &str) -> Result<AioQuery, SciDBError> {
         // Create AioQuery buffer and get path
         let mut aio = AioQuery::new()?;
 
