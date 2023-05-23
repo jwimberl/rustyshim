@@ -113,19 +113,21 @@ impl SciDBConnection {
         username: &str,
         password: &str,
         scidbport: i32,
+        request_admin: bool,
     ) -> Result<SciDBConnection, SciDBError> {
         let mut status: i32 = 0;
         let sp = &mut status as *mut i32;
         let chostname = CString::new(hostname)?;
         let cusername = CString::new(username)?;
         let cpassword = CString::new(password)?;
+        let adminflag = if request_admin { 1 } else { 0 };
         let c_conn = unsafe {
             c_scidb_connect(
                 chostname.as_ptr(),
                 scidbport,
                 cusername.as_ptr(),
                 cpassword.as_ptr(),
-                0,
+                adminflag,
                 sp,
             )
         };

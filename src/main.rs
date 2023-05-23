@@ -67,10 +67,22 @@ struct SciDBAdministrator {
 
 #[tonic::async_trait]
 impl FusionFlightAdministrator for SciDBAdministrator {
-    fn authenticate(&self, username: &String, password: &String) -> SessionType {
-        let conn = SciDBConnection::new(&self.hostname, username, password, self.port);
+    fn authenticate(
+        &self,
+        username: &String,
+        password: &String,
+        request_admin: bool,
+    ) -> SessionType {
+        let conn =
+            SciDBConnection::new(&self.hostname, username, password, self.port, request_admin);
         match conn {
-            Ok(_) => SessionType::Admin, // TODO: check user permissions
+            Ok(_) => {
+                if request_admin {
+                    SessionType::Admin
+                } else {
+                    SessionType::Regular
+                }
+            }
             Err(_) => SessionType::Unauthenticated,
         }
     }
@@ -149,7 +161,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // Connect to SciDB...
-    let conn = SciDBConnection::new(&args.hostname, &username, &password, args.port)?;
+    let conn = SciDBConnection::new(&args.hostname, &username, &password, args.port, true)?;
 
     // Create SciDBAdministrator //
     let admin = SciDBAdministrator {

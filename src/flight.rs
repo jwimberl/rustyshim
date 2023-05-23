@@ -84,7 +84,12 @@ type TicketMap = Arc<RwLock<HashMap<String, TicketInfo>>>;
 
 pub trait FusionFlightAdministrator {
     // Authentication and authorization
-    fn authenticate(&self, username: &String, password: &String) -> SessionType;
+    fn authenticate(
+        &self,
+        username: &String,
+        password: &String,
+        request_admin: bool,
+    ) -> SessionType;
 
     // (Re)create datafusion SessionContext
     fn refresh_context(&self) -> Result<SessionContext, Box<dyn std::error::Error>>;
@@ -229,22 +234,37 @@ impl FlightService for FusionFlightService {
         // Get username and password as separate messages
         let mut rq = _request.into_inner();
         let username = if let Some(hsr) = rq.message().await? {
-            hsr.payload.escape_ascii().to_string()
+            Ok(hsr.payload.escape_ascii().to_string())
         } else {
-            return Err(Status::invalid_argument(
-                "Username not provided during handshake",
-            ));
-        };
+            Err(Status::invalid_argument(
+                "username not provided during handshake",
+            ))
+        }?;
         let password = if let Some(hsr) = rq.message().await? {
-            hsr.payload.escape_ascii().to_string()
+            Ok(hsr.payload.escape_ascii().to_string())
         } else {
-            return Err(Status::invalid_argument(
-                "Password not provided during handshake",
-            ));
-        };
+            Err(Status::invalid_argument(
+                "password not provided during handshake",
+            ))
+        }?;
+        let request_admin = if let Some(hsr) = rq.message().await? {
+            match &hsr.payload[..] {
+                b"0" => Ok(false),
+                b"1" => Ok(true),
+                _ => Err(Status::invalid_argument(
+                    "request_admin flag has invalid value",
+                )),
+            }
+        } else {
+            Err(Status::invalid_argument(
+                "request_admin flag not provided during handshake",
+            ))
+        }?;
 
         // Authenticate
-        let st = self.administrator.authenticate(&username, &password);
+        let st = self
+            .administrator
+            .authenticate(&username, &password, request_admin);
         if st == SessionType::Unauthenticated {
             return Err(Status::unauthenticated("authentication failed"));
         }
@@ -402,7 +422,9 @@ impl FlightService for FusionFlightService {
                     .refresh_context()
                     .map_err(|_e| Status::internal("internal error refreshing context"))?;
                 *wctx = new_ctx;
-                let result = arrow_flight::Result { body: bytes::Bytes::from("SUCCESS") };
+                let result = arrow_flight::Result {
+                    body: bytes::Bytes::from("SUCCESS"),
+                };
                 let response = futures::stream::iter(vec![Ok(result)]);
                 Ok(tonic::Response::new(Box::pin(response)))
             }
