@@ -1,7 +1,7 @@
 use arrow_flight::flight_service_server::FlightServiceServer;
 use clap::Parser;
 use datafusion::prelude::*;
-use rustyshim::flight::{FusionFlightAuthenticator, FusionFlightService};
+use rustyshim::flight::{FusionFlightAdministrator, FusionFlightService, SessionType};
 use rustyshim::scidb::SciDBConnection;
 use serde::{Deserialize, Serialize};
 use serde_yaml;
@@ -58,19 +58,64 @@ struct Args {
 
 // Authenticator class //
 #[derive(Clone)]
-struct SciDBAuthenticator {
+struct SciDBAdministrator {
+    conn: SciDBConnection,
     hostname: String,
     port: i32,
+    config_path: std::path::PathBuf,
 }
 
 #[tonic::async_trait]
-impl FusionFlightAuthenticator for SciDBAuthenticator {
-    fn authenticate(&self, username: &String, password: &String) -> bool {
-        let conn = SciDBConnection::new(&self.hostname, username, password, self.port);
+impl FusionFlightAdministrator for SciDBAdministrator {
+    fn authenticate(
+        &self,
+        username: &String,
+        password: &String,
+        request_admin: bool,
+    ) -> SessionType {
+        let conn =
+            SciDBConnection::new(&self.hostname, username, password, self.port, request_admin);
         match conn {
-            Ok(_) => true,
-            Err(_) => false,
+            Ok(_) => {
+                if request_admin {
+                    SessionType::Admin
+                } else {
+                    SessionType::Regular
+                }
+            }
+            Err(_) => SessionType::Unauthenticated,
         }
+    }
+
+    // Admin actions
+    fn refresh_context(&self) -> Result<SessionContext, Box<dyn std::error::Error>> {
+        let db_start = Instant::now();
+        let ctx = SessionContext::new();
+
+        // Read config
+        let conff = std::fs::File::open(&self.config_path)?;
+        let config: ShimConfig = serde_yaml::from_reader(conff)?;
+
+        // Run queries and register as DataFusion tables
+        for arr in config.arrays {
+            let q_start = Instant::now();
+            let aio = self.conn.execute_aio_query(&arr.afl)?;
+            println!(
+                "Executed SciDB query {}.{}",
+                aio.qid.coordinatorid, aio.qid.queryid
+            );
+            let q_duration = q_start.elapsed();
+            println!("Elapsed SciDB query duration: {:?}", q_duration);
+            // at this point data is still on-disk in buffer file
+            let data = aio.to_batches()?; // consumes buffer file, data lives in memory
+                                          // todo: should check that array length is > 0
+            let record_batch =
+                datafusion::arrow::compute::concat_batches(&data[0].schema(), &data).unwrap();
+            ctx.register_batch(&arr.name, record_batch).unwrap();
+        }
+        let db_duration = db_start.elapsed();
+        println!("Elapsed database construction duration: {:?}", db_duration);
+        Ok(ctx)
     }
 }
 
@@ -115,51 +160,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    let conff = std::fs::File::open(&args.config)?;
-    let config: ShimConfig = serde_yaml::from_reader(conff)?;
-
     // Connect to SciDB...
-    let mut conn = SciDBConnection::new(&args.hostname, &username, &password, args.port)?;
+    let conn = SciDBConnection::new(&args.hostname, &username, &password, args.port, true)?;
 
-    // Create a DataFusion context
-    let ctx = SessionContext::new();
-
-    // Run queries and register as DataFusion tables
-    let db_start = Instant::now();
-    for arr in config.arrays {
-        let q_start = Instant::now();
-        let aio = conn.execute_aio_query(&arr.afl)?;
-        println!(
-            "Executed SciDB query {}.{}",
-            aio.qid.coordinatorid, aio.qid.queryid
-        );
-        let q_duration = q_start.elapsed();
-        println!("Elapsed SciDB query duration: {:?}", q_duration);
-        // at this point data is still on-disk in buffer file
-        let data = aio.to_batches()?; // consumes buffer file, data lives in memory
-                                      // todo: should check that array length is > 0
-        let record_batch = datafusion::arrow::compute::concat_batches(&data[0].schema(), &data)?;
-        let reg = ctx.register_batch(&arr.name, record_batch);
-        if let Err(error) = reg {
-            println!(
-                "Error while loading SciDB query results into DataFusion:\n\n{}",
-                error
-            )
-        }
-    }
-    let db_duration = db_start.elapsed();
-    println!("Elapsed database construction duration: {:?}", db_duration);
-
-    // Create SciDBAuthenticator //
-    let auth = SciDBAuthenticator {
+    // Create SciDBAdministrator //
+    let admin = SciDBAdministrator {
+        conn: conn,
         hostname: args.hostname,
         port: args.port,
+        config_path: args.config,
     };
 
-    // Launch Flight server //
+    // Create an initial DataFusion context
+    let ctx = admin.refresh_context()?;
 
+    // Launch Flight server //
     let addr = "127.0.0.1:50051".parse()?;
-    let service = FusionFlightService::new(ctx, Box::new(auth)).await;
+    let service = FusionFlightService::new(ctx, Box::new(admin)).await;
     let svc = FlightServiceServer::new(service);
     Server::builder().add_service(svc).serve(addr).await?;
     Ok(())
