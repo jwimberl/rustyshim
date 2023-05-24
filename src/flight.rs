@@ -57,6 +57,8 @@ fn schema_to_bytes(schema: &Schema) -> bytes::Bytes {
 // FlightService implementation //
 //////////////////////////////////
 
+const ITEM_EXPIRATION_AGE: Duration = Duration::from_secs(86400);
+
 #[derive(Clone, Copy, PartialEq)]
 pub enum SessionType {
     Admin,
@@ -76,6 +78,7 @@ pub struct ClientSessionInfo {
 // - store token to add per-session protection
 #[derive(Clone)]
 pub struct TicketInfo {
+    start: Instant,
     dataframe: DataFrame,
 }
 
@@ -184,7 +187,7 @@ impl FusionFlightService {
             .get(provided_token)
             .ok_or(Status::unauthenticated("invalid session token"))?;
         let token_age = info.start.elapsed();
-        if token_age > Duration::from_secs(86400) {
+        if token_age > ITEM_EXPIRATION_AGE {
             return Err(Status::unauthenticated("expired session token"));
         }
         Ok(info.session_type)
@@ -200,6 +203,7 @@ impl FusionFlightService {
         (*tdb).insert(
             ticket.clone(),
             TicketInfo {
+                start: Instant::now(),
                 dataframe: dataframe,
             },
         );
@@ -428,6 +432,27 @@ impl FlightService for FusionFlightService {
                 let response = futures::stream::iter(vec![Ok(result)]);
                 Ok(tonic::Response::new(Box::pin(response)))
             }
+            "CLEAR_EXPIRED_ITEMS" => {
+                let mut tokdb = self.token_map.write().await;
+                let mut tikdb = self.ticket_map.write().await;
+                let tokcount = tokdb.len();
+                let tikcount = tikdb.len();
+                (*tokdb).retain(|_, v| v.start.elapsed() < ITEM_EXPIRATION_AGE);
+                (*tikdb).retain(|_, v| v.start.elapsed() < ITEM_EXPIRATION_AGE);
+                let result = arrow_flight::Result {
+                    body: bytes::Bytes::from("SUCCESS"),
+                };
+                let tokdiff = tokcount - tokdb.len();
+                let tokprune = arrow_flight::Result {
+                    body: bytes::Bytes::from(format!("REMOVED {tokdiff} EXPIRED SESSION TOKENS")),
+                };
+                let tikdiff = tikcount - tikdb.len();
+                let tikprune = arrow_flight::Result {
+                    body: bytes::Bytes::from(format!("REMOVED {tikdiff} EXPIRED TICKETS")),
+                };
+                let response = futures::stream::iter(vec![Ok(result), Ok(tokprune), Ok(tikprune)]);
+                Ok(tonic::Response::new(Box::pin(response)))
+            }
             _ => Err(Status::invalid_argument("invalid action")),
         }
     }
@@ -447,10 +472,16 @@ impl FlightService for FusionFlightService {
         // Return list of actions
         let refresh_context = arrow_flight::ActionType {
             r#type: String::from("REFRESH_CONTEXT"),
-            description: String::from(""),
+            description: String::from("Re-generate the tables by querying SciDB"),
+        };
+        let clear_expired_items = arrow_flight::ActionType {
+            r#type: String::from("CLEAR_EXPIRED_ITEMS"),
+            description: format!(
+                "Clear all sessions and tokens greater than {ITEM_EXPIRATION_AGE:?} secs old",
+            ),
         };
 
-        let actions = vec![Ok(refresh_context)];
+        let actions = vec![Ok(refresh_context), Ok(clear_expired_items)];
         let response = futures::stream::iter(actions);
         Ok(tonic::Response::new(Box::pin(response)))
     }
